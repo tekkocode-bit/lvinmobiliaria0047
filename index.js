@@ -88,6 +88,43 @@ function sanitizeFileName(name, fallback = "file") {
   return raw.replace(/[\\/:*?"<>|]+/g, "_");
 }
 
+function splitMultiUrlString(value) {
+  return String(value || "")
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeMediaUrl(item) {
+  if (!item) return "";
+  if (typeof item === "string") return item.trim();
+  if (typeof item === "object") {
+    return String(
+      item.url ||
+        item.link ||
+        item.src ||
+        item.secure_url ||
+        item.media_url ||
+        item.image_link ||
+        item.video_url ||
+        ""
+    ).trim();
+  }
+  return "";
+}
+
+function normalizeMediaList(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) return input.map(normalizeMediaUrl).filter(Boolean);
+  if (typeof input === "string") return splitMultiUrlString(input).map(normalizeMediaUrl).filter(Boolean);
+  const one = normalizeMediaUrl(input);
+  return one ? [one] : [];
+}
+
+function uniqueStrings(arr) {
+  return [...new Set((arr || []).map((v) => String(v || "").trim()).filter(Boolean))];
+}
+
 function defaultWorkHours() {
   return {
     mon: { start: "08:00", end: "17:30" },
@@ -239,7 +276,7 @@ const REAL_ESTATE_AI_ENABLED = (process.env.REAL_ESTATE_AI_ENABLED || "1") === "
 const AI_PROPERTY_RECOMMENDATION_LIMIT = parseInt(process.env.AI_PROPERTY_RECOMMENDATION_LIMIT || "3", 10);
 
 const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
-const BUSINESS_NAME = process.env.BUSINESS_NAME || process.env.CLINIC_NAME || "Inmobiliaria";
+const BUSINESS_NAME = process.env.BUSINESS_NAME || process.env.CLINIC_NAME || "LV Inmobiliaria";
 const BUSINESS_ADDRESS = process.env.BUSINESS_ADDRESS || process.env.CLINIC_ADDRESS || "";
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || process.env.CLINIC_TIMEZONE || "America/Santo_Domingo";
 
@@ -262,6 +299,11 @@ const REMINDER_2H = (process.env.REMINDER_2H || "1") === "1";
 const PERSONAL_WA_TO = (process.env.PERSONAL_WA_TO || "").trim();
 
 const WA_CATALOG_ID = (process.env.WA_CATALOG_ID || "").trim();
+const WA_CATALOG_URL = (process.env.WA_CATALOG_URL || process.env.CATALOG_PUBLIC_URL || "").trim();
+const WA_CATALOG_PHONE = normalizePhoneDigits(process.env.WA_CATALOG_PHONE || process.env.CATALOG_PHONE || "");
+
+const PROPERTY_MEDIA_MAX_IMAGES = parseInt(process.env.PROPERTY_MEDIA_MAX_IMAGES || "8", 10);
+const PROPERTY_MEDIA_MAX_VIDEOS = parseInt(process.env.PROPERTY_MEDIA_MAX_VIDEOS || "1", 10);
 
 const BOTHUB_WEBHOOK_URL = (process.env.BOTHUB_WEBHOOK_URL || "").trim();
 const BOTHUB_WEBHOOK_SECRET = (process.env.BOTHUB_WEBHOOK_SECRET || "").trim();
@@ -282,6 +324,33 @@ function normalizeProperty(raw, index) {
   const id = String(raw?.id || `prop_${index + 1}`);
   const retailerId = String(raw?.retailer_id || raw?.product_retailer_id || raw?.code || id);
   const code = String(raw?.code || raw?.reference || retailerId || id);
+
+  const coverImage = normalizeMediaUrl(
+    raw?.image_link ||
+      raw?.image ||
+      raw?.cover_image ||
+      raw?.featured_image ||
+      raw?.primary_image ||
+      raw?.main_image
+  );
+
+  const images = uniqueStrings([
+    coverImage,
+    ...normalizeMediaList(raw?.images),
+    ...normalizeMediaList(raw?.gallery),
+    ...normalizeMediaList(raw?.additional_images),
+    ...normalizeMediaList(raw?.additional_image_links),
+    ...normalizeMediaList(raw?.image_links),
+  ]);
+
+  const coverVideo = normalizeMediaUrl(raw?.video_url || raw?.video || raw?.featured_video || raw?.main_video);
+
+  const videos = uniqueStrings([
+    coverVideo,
+    ...normalizeMediaList(raw?.videos),
+    ...normalizeMediaList(raw?.video_links),
+  ]);
+
   return {
     id,
     retailer_id: retailerId,
@@ -300,8 +369,12 @@ function normalizeProperty(raw, index) {
     short_description: String(raw?.short_description || raw?.description || ""),
     features: Array.isArray(raw?.features) ? raw.features.map((f) => String(f || "").trim()).filter(Boolean) : [],
     parking: raw?.parking ?? raw?.parkings ?? "",
-    status: String(raw?.status || (raw?.active === false ? "inactiva" : "disponible")),
     duration_min: Number(raw?.duration_min || 0),
+    image_link: images[0] || "",
+    images,
+    video_url: videos[0] || "",
+    videos,
+    status: String(raw?.status || (raw?.active === false ? "inactiva" : "disponible")),
     active:
       raw?.active !== false &&
       !["vendida", "alquilada", "rentada", "inactiva", "oculta", "no publicar"].includes(
@@ -726,6 +799,26 @@ function propertySummary(property) {
   return parts.join("\n");
 }
 
+function getCatalogPublicUrl() {
+  if (WA_CATALOG_URL) return WA_CATALOG_URL;
+  if (WA_CATALOG_PHONE) return `https://wa.me/c/${WA_CATALOG_PHONE}`;
+  return "";
+}
+
+function getPropertyImages(property) {
+  return uniqueStrings([
+    property?.image_link || "",
+    ...(Array.isArray(property?.images) ? property.images : []),
+  ]);
+}
+
+function getPropertyVideos(property) {
+  return uniqueStrings([
+    property?.video_url || "",
+    ...(Array.isArray(property?.videos) ? property.videos : []),
+  ]);
+}
+
 function parseNumericValue(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1067,7 +1160,7 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
       handled: true,
       property,
       autoSelected: true,
-      message: `${propertySummary(property)}\n\nEntendí lo que buscas y esta opción parece encajar muy bien ✅\n¿Cuándo te gustaría visitarla?\nEj: "mañana", "viernes", "14 de junio".`,
+      message: `Entendí lo que buscas y esta opción parece encajar muy bien ✅\n¿Cuándo te gustaría visitarla?\nEj: "mañana", "viernes", "14 de junio".`,
     };
   }
 
@@ -1081,19 +1174,17 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
 
 function welcomeText() {
   return (
-    `👋 ¡Hola! Soy el asistente de *${BUSINESS_NAME}*.\n\n` +
+    `👋 Hola, soy el asistente de *${BUSINESS_NAME}*.\n\n` +
     `Te ayudo a ver propiedades disponibles y agendar una visita.\n\n` +
-    `👇 Toca el botón de abajo para explorar el catálogo por categorías.\n\n` +
-    `Si prefieres, también puedes escribirme algo como:\n` +
-    `"Busco apartamento en Naco para alquiler".`
+    `👇 Toca el botón de abajo para explorar el catálogo por categorías.`
   );
 }
 
 function quickHelpText() {
   return (
-    `Claro 😊\n` +
+    `👋 Hola, soy el asistente de *${BUSINESS_NAME}*.\n\n` +
     `Te ayudo a ver propiedades disponibles y agendar una visita.\n\n` +
-    `👇 Abre el catálogo por categorías o dime qué tipo de propiedad buscas.`
+    `👇 Toca el botón de abajo para explorar el catálogo por categorías.`
   );
 }
 
@@ -1181,7 +1272,6 @@ function findPropertyByAny(value) {
   return (
     PROPERTY_CATALOG.find((p) => normalizeText(p.title) === codeNorm) ||
     PROPERTY_CATALOG.find((p) => codeNorm.includes(normalizeText(p.title))) ||
-    PROPERTY_CATALOG.find((p) => codeNorm.includes(normalizeText(p.code))) ||
     PROPERTY_CATALOG.find((p) => p.location && codeNorm.includes(normalizeText(p.location))) ||
     null
   );
@@ -1248,6 +1338,87 @@ async function sendWhatsAppText(to, text, reportSource = "BOT") {
   });
 }
 
+async function sendWhatsAppImage(to, imageUrl, caption = "", reportSource = "BOT") {
+  if (!imageUrl) return;
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: {
+      link: imageUrl,
+    },
+  };
+
+  if (caption) payload.image.caption = caption;
+
+  await axios.post(url, payload, {
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body: caption || "[IMAGE]",
+    source: reportSource,
+    kind: "IMAGE",
+    mediaUrl: imageUrl,
+  });
+}
+
+async function sendWhatsAppVideo(to, videoUrl, caption = "", reportSource = "BOT") {
+  if (!videoUrl) return;
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "video",
+    video: {
+      link: videoUrl,
+    },
+  };
+
+  if (caption) payload.video.caption = caption;
+
+  await axios.post(url, payload, {
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body: caption || "[VIDEO]",
+    source: reportSource,
+    kind: "VIDEO",
+    mediaUrl: videoUrl,
+  });
+}
+
+async function sendPropertyMediaBundle(to, property) {
+  if (!property) return;
+
+  const images = getPropertyImages(property).slice(0, Math.max(0, PROPERTY_MEDIA_MAX_IMAGES));
+  const videos = getPropertyVideos(property).slice(0, Math.max(0, PROPERTY_MEDIA_MAX_VIDEOS));
+
+  for (const imageUrl of images) {
+    await sendWhatsAppImage(to, imageUrl);
+  }
+
+  for (const videoUrl of videos) {
+    await sendWhatsAppVideo(to, videoUrl);
+  }
+}
+
+async function sendSelectedPropertyExperience(to, property, nextPrompt = "") {
+  await sendWhatsAppText(to, propertySummary(property));
+  await sendPropertyMediaBundle(to, property);
+  if (nextPrompt) {
+    await sendWhatsAppText(to, nextPrompt);
+  }
+}
+
 async function sendReminderWhatsAppToBestTarget(priv, fallbackPhoneDigits, text) {
   const candidates = [];
   if (priv?.wa_id) candidates.push(String(priv.wa_id).trim());
@@ -1271,7 +1442,7 @@ async function sendReminderWhatsAppToBestTarget(priv, fallbackPhoneDigits, text)
   return { ok: false, tried, error: lastErr?.response?.data || lastErr?.message || lastErr };
 }
 
-async function sendPropertyCategoriesList(to) {
+async function sendLegacyCategoriesList(to) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
   const rows = PROPERTY_CATEGORIES.map((c) => ({ id: c.id, title: c.title, description: "" }));
 
@@ -1299,6 +1470,51 @@ async function sendPropertyCategoriesList(to) {
     source: "BOT",
     kind: "LIST",
     meta: { rows },
+  });
+}
+
+async function sendPropertyCategoriesList(to, textBody = "") {
+  const catalogUrl = getCatalogPublicUrl();
+
+  if (!catalogUrl) {
+    return sendLegacyCategoriesList(to);
+  }
+
+  const body = textBody || quickHelpText();
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+
+  await axios.post(
+    url,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "cta_url",
+        body: { text: body },
+        footer: { text: BUSINESS_NAME },
+        action: {
+          name: "cta_url",
+          parameters: {
+            display_text: "Ver catálogo",
+            url: catalogUrl,
+          },
+        },
+      },
+    },
+    { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
+  );
+
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body,
+    source: "BOT",
+    kind: "CTA_URL",
+    meta: {
+      display_text: "Ver catálogo",
+      url: catalogUrl,
+    },
   });
 }
 
@@ -2041,64 +2257,6 @@ function clearVisitFlow(session, keepGreeting = true) {
   if (!keepGreeting) session.greeted = false;
 }
 
-async function finalizeVisitBookingAndNotify({ from, session }) {
-  const visit = await bookVisitTool({
-    lead_name: session.pendingName,
-    phone: session.pendingPhone,
-    slot_id: session.selectedSlot.slot_id,
-    property: session.selectedProperty,
-    zone_interest: session.pendingZone || session.aiProfile?.zone_interest || "",
-    budget: session.pendingBudget || session.aiProfile?.budget || "",
-    notes: "",
-    slot_start: session.selectedSlot.start,
-    slot_end: session.selectedSlot.end,
-    wa_id: from,
-  });
-
-  await sendWhatsAppText(
-    from,
-    `✅ *Visita reservada*\n\n` +
-      `🏠 Propiedad: *${visit.property_title || "—"}*\n` +
-      `🆔 Código: *${visit.property_code || "—"}*\n` +
-      `👤 Lead: *${visit.lead_name}*\n` +
-      `📞 Teléfono: *${visit.phone}*\n` +
-      `📍 Zona de interés: *${visit.zone_interest || "—"}*\n` +
-      `💰 Presupuesto: *${visit.budget || "—"}*\n` +
-      `📅 Fecha: *${formatDateInTZ(visit.start, BUSINESS_TIMEZONE)}*\n` +
-      `⏰ Hora: *${formatTimeInTZ(visit.start, BUSINESS_TIMEZONE)}*\n` +
-      `📍 Dirección: ${BUSINESS_ADDRESS || session.selectedProperty?.location || "—"}\n\n` +
-      `Responde:\n1) Confirmar\n2) Reprogramar\n3) Cancelar`
-  );
-
-  await notifyPersonalWhatsAppVisitSummary(visit);
-  await reportLeadEventToCrm({
-    to: from,
-    action: "visit_booked",
-    property: session.selectedProperty,
-    lead_name: visit.lead_name,
-    phone: visit.phone,
-    zone_interest: visit.zone_interest,
-    budget: visit.budget,
-    visit_start: visit.start,
-    visit_id: visit.visit_id,
-  });
-
-  session.lastVisit = visit;
-  session.state = "post_booking";
-  session.lastSlots = [];
-  session.lastDisplaySlots = [];
-  session.lastRecommendations = [];
-  session.selectedSlot = null;
-  session.pendingName = null;
-  session.pendingPhone = null;
-  session.pendingZone = null;
-  session.pendingBudget = null;
-  session.pendingRange = null;
-  session.reschedule = defaultSession().reschedule;
-
-  return visit;
-}
-
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -2221,15 +2379,13 @@ app.post("/webhook", async (req, res) => {
       looksLikeCatalogRequest(tNorm);
 
     if (session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
-      await sendWhatsAppText(from, quickHelpText());
-      await sendPropertyCategoriesList(from);
+      await sendPropertyCategoriesList(from, quickHelpText());
       return res.sendStatus(200);
     }
 
     if (!session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
       session.greeted = true;
-      await sendWhatsAppText(from, welcomeText());
-      await sendPropertyCategoriesList(from);
+      await sendPropertyCategoriesList(from, welcomeText());
       return res.sendStatus(200);
     }
 
@@ -2253,7 +2409,7 @@ app.post("/webhook", async (req, res) => {
 
       if (wantsCancel) {
         await cancelVisitTool({ visit_id: v.visit_id, reason: userText });
-        await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, escribe *catálogo* y te muestro opciones.`);
+        await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, toca el botón del catálogo y te muestro opciones.`);
         session.lastVisit = null;
         clearVisitFlow(session);
         return res.sendStatus(200);
@@ -2302,8 +2458,7 @@ app.post("/webhook", async (req, res) => {
       if (looksLikeNewVisit(tNorm)) {
         session.lastVisit = null;
         clearVisitFlow(session);
-        await sendWhatsAppText(from, `Claro ✅ Vamos a agendar una nueva visita.`);
-        await sendPropertyCategoriesList(from);
+        await sendPropertyCategoriesList(from, quickHelpText());
         return res.sendStatus(200);
       }
 
@@ -2317,7 +2472,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendWhatsAppText(
         from,
-        `Estoy aquí ✅\nSi deseas *reprogramar* o *cancelar* tu visita, responde:\n2) Reprogramar\n3) Cancelar\n\nSi deseas otra propiedad, escribe *catálogo*.`
+        `Estoy aquí ✅\nSi deseas *reprogramar* o *cancelar* tu visita, responde:\n2) Reprogramar\n3) Cancelar\n\nSi deseas otra propiedad, toca el botón del catálogo.`
       );
       return res.sendStatus(200);
     }
@@ -2338,9 +2493,11 @@ app.post("/webhook", async (req, res) => {
         action: "property_selected",
         property: pickedProperty,
       });
-      await sendWhatsAppText(
+
+      await sendSelectedPropertyExperience(
         from,
-        `${propertySummary(pickedProperty)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
+        pickedProperty,
+        `Excelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
       );
       return res.sendStatus(200);
     }
@@ -2349,7 +2506,7 @@ app.post("/webhook", async (req, res) => {
       if (["reiniciar", "reset", "resetear", "empezar", "inicio"].some((k) => tNorm.includes(k))) {
         clearVisitFlow(session);
         await sendWhatsAppText(from, `Listo ✅ Reinicié el proceso.`);
-        await sendPropertyCategoriesList(from);
+        await sendPropertyCategoriesList(from, quickHelpText());
         return res.sendStatus(200);
       }
 
@@ -2543,7 +2700,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (looksLikeCatalogRequest(tNorm)) {
-      await sendPropertyCategoriesList(from);
+      await sendPropertyCategoriesList(from, quickHelpText());
       return res.sendStatus(200);
     }
 
@@ -2562,13 +2719,15 @@ app.post("/webhook", async (req, res) => {
         action: "property_selected",
         property: detectedPropertyEarly,
       });
+
       const range = parseDateRangeFromText(userText);
 
       if (!range) {
         session.state = "await_day";
-        await sendWhatsAppText(
+        await sendSelectedPropertyExperience(
           from,
-          `${propertySummary(detectedPropertyEarly)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
+          detectedPropertyEarly,
+          `Excelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
         );
         return res.sendStatus(200);
       }
@@ -2576,8 +2735,9 @@ app.post("/webhook", async (req, res) => {
       const slots = await getAvailableVisitSlotsTool({ property: detectedPropertyEarly, from: range.from, to: range.to });
       if (!slots.length) {
         session.state = "await_day";
-        await sendWhatsAppText(
+        await sendSelectedPropertyExperience(
           from,
+          detectedPropertyEarly,
           `Reconocí la propiedad *${propertyPublicLabel(detectedPropertyEarly)}* ✅\nPero no veo espacios disponibles para ese rango.\nDime otro día.`
         );
         return res.sendStatus(200);
@@ -2586,7 +2746,9 @@ app.post("/webhook", async (req, res) => {
       session.pendingRange = range;
       session.lastSlots = slots;
       session.state = "await_slot_choice";
-      await sendWhatsAppText(from, `${propertySummary(detectedPropertyEarly)}\n\n${formatSlotsList(detectedPropertyEarly, slots, session)}`);
+      await sendWhatsAppText(from, propertySummary(detectedPropertyEarly));
+      await sendPropertyMediaBundle(from, detectedPropertyEarly);
+      await sendWhatsAppText(from, formatSlotsList(detectedPropertyEarly, slots, session));
       return res.sendStatus(200);
     }
 
@@ -2645,6 +2807,12 @@ app.post("/webhook", async (req, res) => {
           budget: session.aiProfile?.budget || "",
         });
       }
+
+      if (advisor?.property && advisor?.autoSelected) {
+        await sendSelectedPropertyExperience(from, advisor.property, advisor.message);
+        return res.sendStatus(200);
+      }
+
       await sendWhatsAppText(from, advisor.message);
       return res.sendStatus(200);
     }
