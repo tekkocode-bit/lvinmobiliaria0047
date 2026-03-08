@@ -714,8 +714,7 @@ function propertySummary(property) {
     property.area_m2 !== "" ? `📐 ${property.area_m2} m²` : "",
     property.short_description ? `📝 ${property.short_description}` : "",
   ].filter(Boolean);
-  return parts.join("
-");
+  return parts.join("\n");
 }
 
 function parseNumericValue(value) {
@@ -723,8 +722,8 @@ function parseNumericValue(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   let s = normalizeText(String(value));
   if (!s) return null;
-  const hasMillion = s.includes("millon") || s.includes("millones") || /mm/.test(s);
-  const hasThousand = /k/.test(s) || s.includes("mil");
+  const hasMillion = s.includes("millon") || s.includes("millones") || /\bmm\b/.test(s);
+  const hasThousand = /\bk\b/.test(s) || s.includes("mil");
   s = s.replace(/rd\$/g, "").replace(/us\$/g, "").replace(/usd/g, "").replace(/dop/g, "").replace(/,/g, "");
   const match = s.match(/\d+(?:\.\d+)?/);
   if (!match) return null;
@@ -755,8 +754,7 @@ function summarizeCatalogForPrompt(limit = 25) {
       ].filter(Boolean);
       return pieces.join(" | ");
     })
-    .join("
-");
+    .join("\n");
 }
 
 function mergeLeadProfile(base = {}, extra = {}) {
@@ -872,8 +870,7 @@ function formatRecommendationMessage(criteria = {}, properties = []) {
     `${header}
 
 ` +
-    properties.map((p, i) => formatPropertyShortLine(p, i)).join("
-") +
+    properties.map((p, i) => formatPropertyShortLine(p, i)).join("\n") +
     `
 
 Respóndeme con el *número* o con el *código* de la propiedad que te interese, y te ayudo a agendar la visita.`
