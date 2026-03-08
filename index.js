@@ -302,7 +302,11 @@ function normalizeProperty(raw, index) {
     parking: raw?.parking ?? raw?.parkings ?? "",
     status: String(raw?.status || (raw?.active === false ? "inactiva" : "disponible")),
     duration_min: Number(raw?.duration_min || 0),
-    active: raw?.active !== false && !["vendida", "alquilada", "rentada", "inactiva", "oculta", "no publicar"].includes(normalizeText(raw?.status || "disponible")),
+    active:
+      raw?.active !== false &&
+      !["vendida", "alquilada", "rentada", "inactiva", "oculta", "no publicar"].includes(
+        normalizeText(raw?.status || "disponible")
+      ),
   };
 }
 
@@ -699,12 +703,17 @@ function propertyLabel(property) {
   return property.code ? `${property.title} (${property.code})` : property.title;
 }
 
+function propertyPublicLabel(property) {
+  if (!property) return "propiedad";
+  return property.title || property.code || "propiedad";
+}
+
 function propertySummary(property) {
   if (!property) return "";
   const price = formatMoney(property.price, property.currency);
   const operation = propertyOperationLabel(property.operation);
   const parts = [
-    `🏠 *${propertyLabel(property)}*`,
+    `🏠 *${propertyPublicLabel(property)}*`,
     operation ? `🏷️ ${operation}` : "",
     property.category ? `📂 ${categoryTitle(property.category)}` : "",
     property.location ? `📍 ${property.location}` : "",
@@ -846,8 +855,7 @@ function findMatchingProperties(criteria = {}, limit = AI_PROPERTY_RECOMMENDATIO
 function formatPropertyShortLine(property, index) {
   const price = formatMoney(property.price, property.currency);
   return [
-    `${index + 1}. *${property.title || property.code || "Propiedad"}*`,
-    property.code ? `(Código: ${property.code})` : "",
+    `${index + 1}. *${propertyPublicLabel(property)}*`,
     property.location ? `- ${property.location}` : "",
     price ? `- ${price}` : "",
     property.bedrooms !== "" ? `- ${property.bedrooms} hab.` : "",
@@ -867,13 +875,9 @@ function formatRecommendationMessage(criteria = {}, properties = []) {
   const intro = buildRecommendationIntro(criteria);
   const header = intro ? `Encontré opciones que encajan con *${intro}* ✅` : `Encontré estas opciones para ti ✅`;
   return (
-    `${header}
-
-` +
+    `${header}\n\n` +
     properties.map((p, i) => formatPropertyShortLine(p, i)).join("\n") +
-    `
-
-Respóndeme con el *número* o con el *código* de la propiedad que te interese, y te ayudo a agendar la visita.`
+    `\n\nRespóndeme con el *número* o con el *nombre* de la propiedad que te interese, y te ayudo a agendar la visita.`
   );
 }
 
@@ -986,11 +990,8 @@ async function extractLeadCriteriaWithAI(userText, session) {
           `Extrae intención inmobiliaria del mensaje del usuario y responde SOLO JSON válido. ` +
           `Usa estas categorías exactas: alquiler, venta, solares, proyectos, locales_comerciales, casas, apartamentos. ` +
           `Campos: intent, operation, category, zone_interest, budget, budget_max, bedrooms, bathrooms, purpose, timeline, wants_visit, summary. ` +
-          `No inventes valores. Si no está claro usa cadena vacía o null.
-
-` +
-          `Catálogo resumido:
-${summarizeCatalogForPrompt(30)}`,
+          `No inventes valores. Si no está claro usa cadena vacía o null.\n\n` +
+          `Catálogo resumido:\n${summarizeCatalogForPrompt(30)}`,
       },
       { role: "user", content: String(userText || "") },
     ];
@@ -1046,17 +1047,9 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
     return {
       handled: true,
       message:
-        `No encontré una propiedad exacta con esos filtros 🙏
-
-` +
-        `Puedo ayudarte mejor si me dices:
-` +
-        `• zona
-• presupuesto
-• si buscas comprar o alquilar
-• tipo de propiedad
-
-` +
+        `No encontré una propiedad exacta con esos filtros 🙏\n\n` +
+        `Puedo ayudarte mejor si me dices:\n` +
+        `• zona\n• presupuesto\n• si buscas comprar o alquilar\n• tipo de propiedad\n\n` +
         `Ej: "Busco apartamento en Naco para alquiler con presupuesto de US$1,500"`,
     };
   }
@@ -1074,11 +1067,7 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
       handled: true,
       property,
       autoSelected: true,
-      message: `${propertySummary(property)}
-
-Entendí lo que buscas y esta opción parece encajar muy bien ✅
-¿Cuándo te gustaría visitarla?
-Ej: "mañana", "viernes", "14 de junio".`,
+      message: `${propertySummary(property)}\n\nEntendí lo que buscas y esta opción parece encajar muy bien ✅\n¿Cuándo te gustaría visitarla?\nEj: "mañana", "viernes", "14 de junio".`,
     };
   }
 
@@ -1093,16 +1082,19 @@ Ej: "mañana", "viernes", "14 de junio".`,
 function welcomeText() {
   return (
     `👋 ¡Hola! Soy el asistente de *${BUSINESS_NAME}*.\n\n` +
-    `Te ayudo a ver propiedades y agendar visitas.\n\n` +
-    `Puedes hacer una de estas 3 cosas:\n` +
-    `1) Escribir *catálogo* para ver categorías\n` +
-    `2) Enviarme el *código* de una propiedad\n` +
-    `3) Elegir una propiedad del catálogo de WhatsApp y te ayudo a agendar la visita`
+    `Te ayudo a ver propiedades disponibles y agendar una visita.\n\n` +
+    `👇 Toca el botón de abajo para explorar el catálogo por categorías.\n\n` +
+    `Si prefieres, también puedes escribirme algo como:\n` +
+    `"Busco apartamento en Naco para alquiler".`
   );
 }
 
 function quickHelpText() {
-  return `Claro 😊\nPuedes escribirme *catálogo*, enviarme el *código* de la propiedad o decirme qué tipo buscas para ayudarte con la visita.`;
+  return (
+    `Claro 😊\n` +
+    `Te ayudo a ver propiedades disponibles y agendar una visita.\n\n` +
+    `👇 Abre el catálogo por categorías o dime qué tipo de propiedad buscas.`
+  );
 }
 
 function isGreeting(textNorm) {
@@ -1112,7 +1104,9 @@ function isGreeting(textNorm) {
 }
 
 function isThanks(textNorm) {
-  return ["gracias", "ok", "okay", "listo", "perfecto", "dale", "bien", "genial"].some((k) => textNorm === k || textNorm.includes(k));
+  return ["gracias", "ok", "okay", "listo", "perfecto", "dale", "bien", "genial"].some(
+    (k) => textNorm === k || textNorm.includes(k)
+  );
 }
 
 function isChoice(textNorm, n) {
@@ -1121,19 +1115,27 @@ function isChoice(textNorm, n) {
 }
 
 function looksLikeConfirm(textNorm) {
-  return ["confirmar", "confirmo", "confirmada", "confirmado", "confirmacion", "confirmación"].some((k) => (textNorm || "").includes(k));
+  return ["confirmar", "confirmo", "confirmada", "confirmado", "confirmacion", "confirmación"].some((k) =>
+    (textNorm || "").includes(k)
+  );
 }
 
 function looksLikeCancel(textNorm) {
-  return ["cancelar", "cancela", "anular", "anula", "no puedo", "ya no", "cancelacion", "cancelación"].some((k) => (textNorm || "").includes(k));
+  return ["cancelar", "cancela", "anular", "anula", "no puedo", "ya no", "cancelacion", "cancelación"].some((k) =>
+    (textNorm || "").includes(k)
+  );
 }
 
 function looksLikeReschedule(textNorm) {
-  return ["reprogramar", "reprograma", "cambiar", "cambio", "mover", "posponer", "otro horario"].some((k) => (textNorm || "").includes(k));
+  return ["reprogramar", "reprograma", "cambiar", "cambio", "mover", "posponer", "otro horario"].some((k) =>
+    (textNorm || "").includes(k)
+  );
 }
 
 function looksLikeNewVisit(textNorm) {
-  return ["nueva visita", "otra visita", "agendar", "reservar", "visita nueva", "quiero visita"].some((k) => (textNorm || "").includes(k));
+  return ["nueva visita", "otra visita", "agendar", "reservar", "visita nueva", "quiero visita"].some((k) =>
+    (textNorm || "").includes(k)
+  );
 }
 
 function looksLikeHuman(textNorm) {
@@ -1141,7 +1143,9 @@ function looksLikeHuman(textNorm) {
 }
 
 function looksLikeCatalogRequest(textNorm) {
-  return ["catalogo", "catálogo", "propiedades", "ver propiedades", "menu", "menú"].some((k) => (textNorm || "").includes(normalizeText(k)));
+  return ["catalogo", "catálogo", "propiedades", "ver propiedades", "menu", "menú"].some((k) =>
+    (textNorm || "").includes(normalizeText(k))
+  );
 }
 
 function detectCategoryKeyFromUser(text) {
@@ -1279,8 +1283,8 @@ async function sendPropertyCategoriesList(to) {
       type: "interactive",
       interactive: {
         type: "list",
-        header: { type: "text", text: "Catálogo de propiedades" },
-        body: { text: "Selecciona una categoría para ver opciones disponibles 👇" },
+        header: { type: "text", text: "Propiedades disponibles" },
+        body: { text: "Explora ventas, alquileres, solares, casas, apartamentos y más 👇" },
         footer: { text: BUSINESS_NAME },
         action: { button: "Ver categorías", sections: [{ title: "Categorías", rows }] },
       },
@@ -1298,18 +1302,27 @@ async function sendPropertyCategoriesList(to) {
   });
 }
 
-async function sendCatalogForCategory(to, categoryKey) {
+async function sendCatalogForCategory(to, categoryKey, session = null) {
   const properties = (PROPERTY_GROUPS[categoryKey] || []).slice(0, 30);
   if (!properties.length) {
-    await sendWhatsAppText(to, `Ahora mismo no veo propiedades cargadas en *${categoryTitle(categoryKey)}*. Puedes pedirme otra categoría o escribir *asesor* para ayudarte manualmente.`);
+    await sendWhatsAppText(
+      to,
+      `Ahora mismo no veo propiedades cargadas en *${categoryTitle(categoryKey)}*. Puedes pedirme otra categoría o escribir *asesor* para ayudarte manualmente.`
+    );
     return;
   }
 
   if (!WA_CATALOG_ID) {
-    const lines = properties.slice(0, 12).map((p) => `• ${propertyLabel(p)}`);
+    const preview = properties.slice(0, 12);
+    if (session) {
+      session.lastRecommendations = preview;
+      session.state = "await_property_choice";
+    }
+
+    const lines = preview.map((p, i) => formatPropertyShortLine(p, i));
     await sendWhatsAppText(
       to,
-      `Te encontré opciones en *${categoryTitle(categoryKey)}* ✅\n\n${lines.join("\n")}\n\nEscríbeme el *código* de la propiedad que te interesa para agendar la visita.`
+      `Te encontré opciones en *${categoryTitle(categoryKey)}* ✅\n\n${lines.join("\n")}\n\nRespóndeme con el *número* o con el *nombre* de la propiedad que te interese y te ayudo a agendar la visita.`
     );
     return;
   }
@@ -1353,7 +1366,17 @@ async function sendCatalogForCategory(to, categoryKey) {
   });
 }
 
-async function reportLeadEventToCrm({ to, action, property, lead_name = "", phone = "", zone_interest = "", budget = "", visit_start = "", visit_id = "" }) {
+async function reportLeadEventToCrm({
+  to,
+  action,
+  property,
+  lead_name = "",
+  phone = "",
+  zone_interest = "",
+  budget = "",
+  visit_start = "",
+  visit_id = "",
+}) {
   try {
     const tags = getLeadTagsForProperty(property);
     const primaryTag = getPrimaryLeadTag(property);
@@ -1364,7 +1387,9 @@ async function reportLeadEventToCrm({ to, action, property, lead_name = "", phon
       zone_interest ? `ZONA: ${zone_interest}` : "",
       budget ? `PRESUPUESTO: ${budget}` : "",
       visit_start ? `VISITA: ${visit_start}` : "",
-    ].filter(Boolean).join(" | ");
+    ]
+      .filter(Boolean)
+      .join(" | ");
 
     await bothubReportMessage({
       direction: "OUTBOUND",
@@ -1474,7 +1499,10 @@ function buildCandidateSlotsZoned({ fromISO, toISO, durationMin }) {
       while (cursorMin + durationMin <= endMin) {
         const h = Math.floor(cursorMin / 60);
         const m = cursorMin % 60;
-        const slotStartUTC = zonedTimeToUtc({ year: curLocal.year, month: curLocal.month, day: curLocal.day, hour: h, minute: m }, BUSINESS_TIMEZONE);
+        const slotStartUTC = zonedTimeToUtc(
+          { year: curLocal.year, month: curLocal.month, day: curLocal.day, hour: h, minute: m },
+          BUSINESS_TIMEZONE
+        );
         const slotEndUTC = new Date(slotStartUTC.getTime() + durationMin * 60000);
         if (slotStartUTC >= from && slotEndUTC <= to) {
           slots.push({ slot_id: `slot_${slotStartUTC.getTime()}`, start: slotStartUTC.toISOString(), end: slotEndUTC.toISOString() });
@@ -1483,7 +1511,10 @@ function buildCandidateSlotsZoned({ fromISO, toISO, durationMin }) {
       }
     }
 
-    const nextDayUTC = zonedTimeToUtc({ year: curLocal.year, month: curLocal.month, day: curLocal.day, hour: 0, minute: 0 }, BUSINESS_TIMEZONE);
+    const nextDayUTC = zonedTimeToUtc(
+      { year: curLocal.year, month: curLocal.month, day: curLocal.day, hour: 0, minute: 0 },
+      BUSINESS_TIMEZONE
+    );
     curUTC = new Date(nextDayUTC.getTime() + 24 * 60 * 60000);
   }
 
@@ -1583,7 +1614,18 @@ async function bookVisitTool({ lead_name, phone, slot_id, property, zone_interes
   };
 }
 
-async function rescheduleVisitTool({ visit_id, new_slot_id, new_start, new_end, property, lead_name, phone, wa_id, zone_interest, budget }) {
+async function rescheduleVisitTool({
+  visit_id,
+  new_slot_id,
+  new_start,
+  new_end,
+  property,
+  lead_name,
+  phone,
+  wa_id,
+  zone_interest,
+  budget,
+}) {
   const calendar = getCalendarClient();
   if (!new_start || !new_end) throw new Error("Missing new_start/new_end");
 
@@ -1847,7 +1889,7 @@ function buildHourlyDisplaySlotsAvailableOnly(allFreeSlots) {
 function formatSlotsList(property, slots, session) {
   if (!slots?.length) return null;
   const dateLabel = formatDateInTZ(slots[0].start, BUSINESS_TIMEZONE);
-  const propertyText = propertyLabel(property);
+  const propertyText = propertyPublicLabel(property);
 
   if (HOURLY_LIST_MODE) {
     const displaySlots = buildHourlyDisplaySlotsAvailableOnly(slots);
@@ -1859,7 +1901,9 @@ function formatSlotsList(property, slots, session) {
 
     return (
       `Estos son los horarios disponibles para visitar *${propertyText}* el *${dateLabel}*:\n\n` +
-      displaySlots.map((s, i) => `${i + 1}. ${formatTimeInTZ(s.start, BUSINESS_TIMEZONE)} - ${formatTimeInTZ(s.end, BUSINESS_TIMEZONE)}`).join("\n") +
+      displaySlots
+        .map((s, i) => `${i + 1}. ${formatTimeInTZ(s.start, BUSINESS_TIMEZONE)} - ${formatTimeInTZ(s.end, BUSINESS_TIMEZONE)}`)
+        .join("\n") +
       `\n\nResponde con el *número* (1,2,3...) o escribe la *hora* (ej: 10:00 am / 3:00 pm).`
     );
   }
@@ -1867,7 +1911,9 @@ function formatSlotsList(property, slots, session) {
   const view = slots.slice(0, Math.max(1, DISPLAY_SLOTS_LIMIT));
   return (
     `Estos son los horarios disponibles para visitar *${propertyText}* el *${dateLabel}*:\n\n` +
-    view.map((s, i) => `${i + 1}. ${formatTimeInTZ(s.start, BUSINESS_TIMEZONE)} - ${formatTimeInTZ(s.end, BUSINESS_TIMEZONE)}`).join("\n") +
+    view
+      .map((s, i) => `${i + 1}. ${formatTimeInTZ(s.start, BUSINESS_TIMEZONE)} - ${formatTimeInTZ(s.end, BUSINESS_TIMEZONE)}`)
+      .join("\n") +
     `\n\nResponde con el *número* (1,2,3...) o escribe la *hora*.`
   );
 }
@@ -1911,22 +1957,17 @@ function tryPickSlotFromUserText(session, userText) {
 
 async function callOpenAIFallback({ session, userText, extraSystem = "" }) {
   if (!OPENAI_API_KEY) {
-    return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo*, envíame el *código* de la propiedad o dime qué tipo buscas.`;
+    return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo* o dime qué tipo de propiedad buscas.`;
   }
 
   try {
-    const selectedPropertyContext = session?.selectedProperty ? `
-Propiedad seleccionada:
-${propertySummary(session.selectedProperty)}` : "";
+    const selectedPropertyContext = session?.selectedProperty
+      ? `\nPropiedad seleccionada:\n${propertySummary(session.selectedProperty)}`
+      : "";
     const recommendationContext = session?.lastRecommendations?.length
-      ? `
-Últimas recomendaciones:
-${session.lastRecommendations.map((p, i) => formatPropertyShortLine(p, i)).join("\n")}`
+      ? `\nÚltimas recomendaciones:\n${session.lastRecommendations.map((p, i) => formatPropertyShortLine(p, i)).join("\n")}`
       : "";
-    const leadProfileContext = session?.aiProfile
-      ? `
-Perfil actual del lead: ${JSON.stringify(session.aiProfile)}`
-      : "";
+    const leadProfileContext = session?.aiProfile ? `\nPerfil actual del lead: ${JSON.stringify(session.aiProfile)}` : "";
 
     const system = {
       role: "system",
@@ -1960,7 +2001,7 @@ Perfil actual del lead: ${JSON.stringify(session.aiProfile)}`
     console.error("callOpenAIFallback error:", e?.response?.data || e?.message || e);
   }
 
-  return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo*, envíame el *código* de la propiedad o dime qué tipo buscas.`;
+  return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo* o dime qué tipo de propiedad buscas.`;
 }
 
 function extractIncomingText(msg) {
@@ -2016,22 +2057,17 @@ async function finalizeVisitBookingAndNotify({ from, session }) {
 
   await sendWhatsAppText(
     from,
-    `✅ *Visita reservada*
-
-🏠 Propiedad: *${visit.property_title || visit.property_code || "—"}*
-🆔 Código: *${visit.property_code || "—"}*
-👤 Lead: *${visit.lead_name}*
-📞 Teléfono: *${visit.phone}*
-📍 Zona de interés: *${visit.zone_interest || "—"}*
-💰 Presupuesto: *${visit.budget || "—"}*
-📅 Fecha: *${formatDateInTZ(visit.start, BUSINESS_TIMEZONE)}*
-⏰ Hora: *${formatTimeInTZ(visit.start, BUSINESS_TIMEZONE)}*
-📍 Dirección: ${BUSINESS_ADDRESS || session.selectedProperty?.location || "—"}
-
-Responde:
-1) Confirmar
-2) Reprogramar
-3) Cancelar`
+    `✅ *Visita reservada*\n\n` +
+      `🏠 Propiedad: *${visit.property_title || "—"}*\n` +
+      `🆔 Código: *${visit.property_code || "—"}*\n` +
+      `👤 Lead: *${visit.lead_name}*\n` +
+      `📞 Teléfono: *${visit.phone}*\n` +
+      `📍 Zona de interés: *${visit.zone_interest || "—"}*\n` +
+      `💰 Presupuesto: *${visit.budget || "—"}*\n` +
+      `📅 Fecha: *${formatDateInTZ(visit.start, BUSINESS_TIMEZONE)}*\n` +
+      `⏰ Hora: *${formatTimeInTZ(visit.start, BUSINESS_TIMEZONE)}*\n` +
+      `📍 Dirección: ${BUSINESS_ADDRESS || session.selectedProperty?.location || "—"}\n\n` +
+      `Responde:\n1) Confirmar\n2) Reprogramar\n3) Cancelar`
   );
 
   await notifyPersonalWhatsAppVisitSummary(visit);
@@ -2102,7 +2138,10 @@ app.get("/hub_media/:mediaId", async (req, res) => {
 
     const downloaded = await downloadMetaMedia(mediaId);
     const mimeType = String(downloaded?.mimeType || "application/octet-stream");
-    const filename = sanitizeFileName(downloaded?.meta?.filename || `media-${mediaId}${extFromMimeType(mimeType)}`, `media-${mediaId}${extFromMimeType(mimeType)}`);
+    const filename = sanitizeFileName(
+      downloaded?.meta?.filename || `media-${mediaId}${extFromMimeType(mimeType)}`,
+      `media-${mediaId}${extFromMimeType(mimeType)}`
+    );
 
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Cache-Control", "private, max-age=300");
@@ -2170,10 +2209,20 @@ app.post("/webhook", async (req, res) => {
     const detectedPropertyEarly = extractCatalogSelection(msg, userText);
     const detectedCategoryEarly = detectCategoryKeyFromUser(userText);
     const detectedRangeEarly = parseDateRangeFromText(userText);
-    const hasEarlyIntent = !!detectedPropertyEarly || !!detectedCategoryEarly || !!detectedRangeEarly || tNorm.includes("visita") || tNorm.includes("agendar") || tNorm.includes("reservar") || tNorm.includes("reprogram") || tNorm.includes("cancel") || looksLikeCatalogRequest(tNorm);
+    const hasEarlyIntent =
+      !!detectedPropertyEarly ||
+      !!detectedCategoryEarly ||
+      !!detectedRangeEarly ||
+      tNorm.includes("visita") ||
+      tNorm.includes("agendar") ||
+      tNorm.includes("reservar") ||
+      tNorm.includes("reprogram") ||
+      tNorm.includes("cancel") ||
+      looksLikeCatalogRequest(tNorm);
 
     if (session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
       await sendWhatsAppText(from, quickHelpText());
+      await sendPropertyCategoriesList(from);
       return res.sendStatus(200);
     }
 
@@ -2204,7 +2253,7 @@ app.post("/webhook", async (req, res) => {
 
       if (wantsCancel) {
         await cancelVisitTool({ visit_id: v.visit_id, reason: userText });
-        await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, escribe *catálogo* o envíame el código de una propiedad.`);
+        await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, escribe *catálogo* y te muestro opciones.`);
         session.lastVisit = null;
         clearVisitFlow(session);
         return res.sendStatus(200);
@@ -2243,7 +2292,10 @@ app.post("/webhook", async (req, res) => {
         session.pendingZone = null;
         session.pendingBudget = null;
 
-        await sendWhatsAppText(from, `Perfecto ✅ Vamos a reprogramar la visita de *${propertyLabel(session.selectedProperty)}*.\n\n¿Para qué día te funciona?\nEj: "mañana", "viernes", "próximo martes".`);
+        await sendWhatsAppText(
+          from,
+          `Perfecto ✅ Vamos a reprogramar la visita de *${propertyPublicLabel(session.selectedProperty)}*.\n\n¿Para qué día te funciona?\nEj: "mañana", "viernes", "próximo martes".`
+        );
         return res.sendStatus(200);
       }
 
@@ -2263,14 +2315,17 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      await sendWhatsAppText(from, `Estoy aquí ✅\nSi deseas *reprogramar* o *cancelar* tu visita, responde:\n2) Reprogramar\n3) Cancelar\n\nSi deseas otra propiedad, escribe *catálogo*.`);
+      await sendWhatsAppText(
+        from,
+        `Estoy aquí ✅\nSi deseas *reprogramar* o *cancelar* tu visita, responde:\n2) Reprogramar\n3) Cancelar\n\nSi deseas otra propiedad, escribe *catálogo*.`
+      );
       return res.sendStatus(200);
     }
 
     if (session.state === "await_property_choice" && session.lastRecommendations?.length) {
       const pickedProperty = tryPickRecommendedPropertyFromUserText(session, userText);
       if (!pickedProperty) {
-        await sendWhatsAppText(from, `Responde con el *número* o el *código* de la propiedad que te interesa y te ayudo con la visita.`);
+        await sendWhatsAppText(from, `Responde con el *número* o con el *nombre* de la propiedad que te interesa y te ayudo con la visita.`);
         return res.sendStatus(200);
       }
 
@@ -2283,11 +2338,10 @@ app.post("/webhook", async (req, res) => {
         action: "property_selected",
         property: pickedProperty,
       });
-      await sendWhatsAppText(from, `${propertySummary(pickedProperty)}
-
-Excelente elección ✅
-¿Cuándo te gustaría visitar esta propiedad?
-Ej: "mañana", "viernes", "14 de junio".`);
+      await sendWhatsAppText(
+        from,
+        `${propertySummary(pickedProperty)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
+      );
       return res.sendStatus(200);
     }
 
@@ -2305,24 +2359,33 @@ Ej: "mañana", "viernes", "14 de junio".`);
         session.lastDisplaySlots = [];
         session.selectedSlot = null;
         session.pendingRange = null;
-        await sendWhatsAppText(from, `Perfecto ✅ Vamos a elegir *otro día* para *${propertyLabel(session.selectedProperty)}*.\n\n¿Para qué día?`);
+        await sendWhatsAppText(
+          from,
+          `Perfecto ✅ Vamos a elegir *otro día* para *${propertyPublicLabel(session.selectedProperty)}*.\n\n¿Para qué día?`
+        );
         return res.sendStatus(200);
       }
 
       const picked = tryPickSlotFromUserText(session, userText);
       if (!picked) {
-        await sendWhatsAppText(from, `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).`);
+        await sendWhatsAppText(
+          from,
+          `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).`
+        );
         return res.sendStatus(200);
       }
 
       if (session.reschedule?.active && session.reschedule.visit_id) {
-        const property = session.selectedProperty || PROPERTY_BY_ID[session.reschedule.property_id] || PROPERTY_BY_RETAILER_ID[session.reschedule.property_retailer_id] || {
-          id: session.reschedule.property_id,
-          code: session.reschedule.property_code,
-          title: session.reschedule.property_title,
-          retailer_id: session.reschedule.property_retailer_id,
-          category: session.reschedule.category,
-        };
+        const property =
+          session.selectedProperty ||
+          PROPERTY_BY_ID[session.reschedule.property_id] ||
+          PROPERTY_BY_RETAILER_ID[session.reschedule.property_retailer_id] || {
+            id: session.reschedule.property_id,
+            code: session.reschedule.property_code,
+            title: session.reschedule.property_title,
+            retailer_id: session.reschedule.property_retailer_id,
+            category: session.reschedule.category,
+          };
 
         await rescheduleVisitTool({
           visit_id: session.reschedule.visit_id,
@@ -2363,7 +2426,13 @@ Ej: "mañana", "viernes", "14 de junio".`);
         session.pendingBudget = null;
         session.reschedule = defaultSession().reschedule;
 
-        await sendWhatsAppText(from, `✅ *Visita reprogramada*\n\n🏠 Propiedad: *${propertyLabel(property)}*\n📅 Fecha: *${formatDateInTZ(picked.start, BUSINESS_TIMEZONE)}*\n⏰ Hora: *${formatTimeInTZ(picked.start, BUSINESS_TIMEZONE)}*\n\nResponde:\n1) Confirmar\n2) Reprogramar\n3) Cancelar`);
+        await sendWhatsAppText(
+          from,
+          `✅ *Visita reprogramada*\n\n🏠 Propiedad: *${propertyPublicLabel(property)}*\n📅 Fecha: *${formatDateInTZ(
+            picked.start,
+            BUSINESS_TIMEZONE
+          )}*\n⏰ Hora: *${formatTimeInTZ(picked.start, BUSINESS_TIMEZONE)}*\n\nResponde:\n1) Confirmar\n2) Reprogramar\n3) Cancelar`
+        );
         await reportLeadEventToCrm({
           to: from,
           action: "visit_rescheduled",
@@ -2373,14 +2442,20 @@ Ej: "mañana", "viernes", "14 de junio".`);
           zone_interest: session.lastVisit.zone_interest,
           budget: session.lastVisit.budget,
           visit_start: picked.start,
-          visit_id: appointment_id,
+          visit_id: session.lastVisit.visit_id,
         });
         return res.sendStatus(200);
       }
 
       session.selectedSlot = picked;
       session.state = "await_name";
-      await sendWhatsAppText(from, `Perfecto ✅ Queda seleccionado el horario ${formatTimeInTZ(picked.start, BUSINESS_TIMEZONE)}.\nAhora indícame tu *nombre completo* para reservar la visita.`);
+      await sendWhatsAppText(
+        from,
+        `Perfecto ✅ Queda seleccionado el horario ${formatTimeInTZ(
+          picked.start,
+          BUSINESS_TIMEZONE
+        )}.\nAhora indícame tu *nombre completo* para reservar la visita.`
+      );
       return res.sendStatus(200);
     }
 
@@ -2474,7 +2549,7 @@ Ej: "mañana", "viernes", "14 de junio".`);
 
     if (detectedCategoryEarly && !detectedPropertyEarly) {
       session.pendingCategory = detectedCategoryEarly;
-      await sendCatalogForCategory(from, detectedCategoryEarly);
+      await sendCatalogForCategory(from, detectedCategoryEarly, session);
       return res.sendStatus(200);
     }
 
@@ -2491,14 +2566,20 @@ Ej: "mañana", "viernes", "14 de junio".`);
 
       if (!range) {
         session.state = "await_day";
-        await sendWhatsAppText(from, `${propertySummary(detectedPropertyEarly)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`);
+        await sendWhatsAppText(
+          from,
+          `${propertySummary(detectedPropertyEarly)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
+        );
         return res.sendStatus(200);
       }
 
       const slots = await getAvailableVisitSlotsTool({ property: detectedPropertyEarly, from: range.from, to: range.to });
       if (!slots.length) {
         session.state = "await_day";
-        await sendWhatsAppText(from, `Reconocí la propiedad *${propertyLabel(detectedPropertyEarly)}* ✅\nPero no veo espacios disponibles para ese rango.\nDime otro día.`);
+        await sendWhatsAppText(
+          from,
+          `Reconocí la propiedad *${propertyPublicLabel(detectedPropertyEarly)}* ✅\nPero no veo espacios disponibles para ese rango.\nDime otro día.`
+        );
         return res.sendStatus(200);
       }
 
@@ -2514,7 +2595,10 @@ Ej: "mañana", "viernes", "14 de junio".`);
       if (range) {
         const slots = await getAvailableVisitSlotsTool({ property: session.selectedProperty, from: range.from, to: range.to });
         if (!slots.length) {
-          await sendWhatsAppText(from, `No veo espacios disponibles para *${propertyLabel(session.selectedProperty)}* en ese rango 🙏\nDime otro día.`);
+          await sendWhatsAppText(
+            from,
+            `No veo espacios disponibles para *${propertyPublicLabel(session.selectedProperty)}* en ese rango 🙏\nDime otro día.`
+          );
           return res.sendStatus(200);
         }
         session.pendingRange = range;
@@ -2525,7 +2609,10 @@ Ej: "mañana", "viernes", "14 de junio".`);
       }
 
       if (session.state === "await_day") {
-        await sendWhatsAppText(from, `Para elegir el día, puedes escribir: "mañana", "viernes", "próximo martes", "14 de junio" o "en junio".`);
+        await sendWhatsAppText(
+          from,
+          `Para elegir el día, puedes escribir: "mañana", "viernes", "próximo martes", "14 de junio" o "en junio".`
+        );
         return res.sendStatus(200);
       }
     }
@@ -2540,7 +2627,10 @@ Ej: "mañana", "viernes", "14 de junio".`);
         zone_interest: session.pendingZone || session.aiProfile?.zone_interest || session.lastVisit?.zone_interest || "",
         budget: session.pendingBudget || session.aiProfile?.budget || session.lastVisit?.budget || "",
       });
-      await sendWhatsAppText(from, `Perfecto ✅ Voy a dejar tu caso listo para que un asesor te continúe ayudando. Mientras tanto, también puedo recomendarte propiedades o agendar una visita si ya tienes una en mente.`);
+      await sendWhatsAppText(
+        from,
+        `Perfecto ✅ Voy a dejar tu caso listo para que un asesor te continúe ayudando. Mientras tanto, también puedo recomendarte propiedades o agendar una visita si ya viste una que te interese en el catálogo.`
+      );
       return res.sendStatus(200);
     }
 
