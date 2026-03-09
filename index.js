@@ -125,6 +125,23 @@ function defaultPropertyCategories() {
   ];
 }
 
+function defaultColdLead() {
+  return {
+    active: false,
+    status: "",
+    started_at: "",
+    last_inbound_at: "",
+    last_outbound_at: "",
+    last_followup_at: "",
+    followup_step: 0,
+    selected_property_id: "",
+    selected_property_title: "",
+    category: "",
+    ai_summary: "",
+    stopped: false,
+  };
+}
+
 function getZonedParts(date, timeZone) {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -275,6 +292,11 @@ const META_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || process.env.MET
 const REDIS_URL_RAW = (process.env.REDIS_URL || "").trim();
 const SESSION_TTL_SEC = parseInt(process.env.SESSION_TTL_SEC || String(60 * 60 * 24 * 14), 10);
 const SESSION_PREFIX = process.env.SESSION_PREFIX || "tekko:realestate:sess:";
+const COLD_LEAD_SET_KEY = process.env.COLD_LEAD_SET_KEY || "tekko:realestate:coldleads";
+const COLD_LEAD_ENABLED = (process.env.COLD_LEAD_ENABLED || "1") === "1";
+const COLD_LEAD_STEP1_MIN = parseInt(process.env.COLD_LEAD_STEP1_MIN || "30", 10);
+const COLD_LEAD_STEP2_MIN = parseInt(process.env.COLD_LEAD_STEP2_MIN || "240", 10);
+const COLD_LEAD_STEP3_MIN = parseInt(process.env.COLD_LEAD_STEP3_MIN || "1380", 10);
 
 const PROPERTY_CATEGORIES = safeJson(process.env.PROPERTY_CATEGORIES_JSON, null) || defaultPropertyCategories();
 
@@ -378,6 +400,7 @@ function defaultSession() {
       purpose: "",
       timeline: "",
     },
+    coldLead: defaultColdLead(),
     lastVisit: null,
     greeted: false,
     lastMsgId: null,
@@ -418,6 +441,17 @@ function sanitizeSession(session) {
       bathrooms: Number.isFinite(Number(session.aiProfile?.bathrooms)) ? Number(session.aiProfile.bathrooms) : null,
     };
   }
+  if (!session.coldLead || typeof session.coldLead !== "object") {
+    session.coldLead = defaultColdLead();
+  } else {
+    session.coldLead = {
+      ...defaultColdLead(),
+      ...session.coldLead,
+      active: Boolean(session.coldLead.active),
+      stopped: Boolean(session.coldLead.stopped),
+      followup_step: Number.isFinite(Number(session.coldLead.followup_step)) ? Number(session.coldLead.followup_step) : 0,
+    };
+  }
   if (!session.reschedule || typeof session.reschedule !== "object") {
     session.reschedule = defaultSession().reschedule;
   }
@@ -447,6 +481,8 @@ async function saveSession(userId, session) {
   }
   const key = `${SESSION_PREFIX}${userId}`;
   await redis.set(key, JSON.stringify(clean), "EX", SESSION_TTL_SEC);
+  if (clean.coldLead?.active && !clean.coldLead?.stopped) await redis.sadd(COLD_LEAD_SET_KEY, userId);
+  else await redis.srem(COLD_LEAD_SET_KEY, userId);
 }
 
 function bothubHmacStable(payload, secret) {
@@ -1030,6 +1066,148 @@ async function extractLeadCriteriaWithAI(userText, session) {
   }
 }
 
+function activateColdLead(session, patch = {}) {
+  const nowIso = new Date().toISOString();
+  const prev = session?.coldLead || defaultColdLead();
+  session.coldLead = {
+    ...defaultColdLead(),
+    ...prev,
+    ...patch,
+    active: true,
+    stopped: false,
+    started_at: prev.started_at || nowIso,
+    last_inbound_at: nowIso,
+  };
+}
+
+function stopColdLead(session, reason = "") {
+  const prev = session?.coldLead || defaultColdLead();
+  session.coldLead = {
+    ...defaultColdLead(),
+    ...prev,
+    active: false,
+    stopped: true,
+    status: reason || prev.status || "stopped",
+  };
+}
+
+function touchColdLeadInbound(session) {
+  const prev = session?.coldLead || defaultColdLead();
+  session.coldLead = {
+    ...defaultColdLead(),
+    ...prev,
+    last_inbound_at: new Date().toISOString(),
+  };
+}
+
+function looksLikeStopFollowUp(textNorm) {
+  const t = normalizeText(textNorm || "");
+  return [
+    "stop",
+    "detener",
+    "parar",
+    "no me escribas",
+    "no escribir",
+    "no me interesa",
+    "ya no me interesa",
+    "deja de escribir",
+  ].some((k) => t.includes(normalizeText(k)));
+}
+
+function canSendColdLeadFreeform(lastInboundAt) {
+  if (!lastInboundAt) return false;
+  const diffMs = Date.now() - new Date(lastInboundAt).getTime();
+  return diffMs <= 23 * 60 * 60 * 1000;
+}
+
+function buildColdLeadFollowupMessage(session, step) {
+  const cold = session?.coldLead || defaultColdLead();
+  const prop = cold.selected_property_title || session?.selectedProperty?.title || "";
+  const category = cold.category ? categoryTitle(cold.category) : "";
+
+  if (step === 1) {
+    if (prop) {
+      return `Hola 👋 Vi que estuviste viendo *${prop}*. Si quieres, te ayudo a retomar el proceso y agendar una visita.`;
+    }
+    if (category) {
+      return `Hola 👋 Vi que estuviste explorando *${category}*. Si quieres, te ayudo a retomar el proceso y ver opciones disponibles.`;
+    }
+    return `Hola 👋 Vi que estuviste viendo propiedades en *${BUSINESS_NAME}*. Si quieres, te ayudo a retomar el proceso y agendar una visita.`;
+  }
+
+  if (step === 2) {
+    return `Puedo ayudarte a encontrar una opción según el tipo de propiedad que buscas. Solo dime algo como *"Busco apartamento en alquiler"* y te recomiendo opciones.`;
+  }
+
+  if (prop) {
+    return `Todavía puedo ayudarte con *${prop}* ✅\nSi quieres, te muestro horarios disponibles para visitarla o te enseño otras opciones similares.`;
+  }
+
+  return `Todavía puedo ayudarte a encontrar una propiedad y agendar una visita ✅\nSi quieres, escribe *catálogo* y retomamos desde ahí.`;
+}
+
+async function coldLeadFollowupLoop() {
+  try {
+    if (!COLD_LEAD_ENABLED) return;
+
+    const ids = redis ? await redis.smembers(COLD_LEAD_SET_KEY) : Array.from(sessions.keys());
+    if (!ids?.length) return;
+
+    const now = Date.now();
+
+    for (const userId of ids) {
+      const session = await getSession(userId);
+      const cold = session?.coldLead || defaultColdLead();
+
+      if (!cold.active || cold.stopped) {
+        await saveSession(userId, session);
+        continue;
+      }
+
+      if (session?.lastVisit?.visit_id) {
+        stopColdLead(session, "visit_booked");
+        await saveSession(userId, session);
+        continue;
+      }
+
+      const lastInboundTs = cold.last_inbound_at ? new Date(cold.last_inbound_at).getTime() : 0;
+      if (!lastInboundTs || !canSendColdLeadFreeform(cold.last_inbound_at)) {
+        stopColdLead(session, "outside_freeform_window");
+        await saveSession(userId, session);
+        continue;
+      }
+
+      const inactiveMin = Math.floor((now - lastInboundTs) / 60000);
+      let nextStep = 0;
+
+      if (cold.followup_step < 1 && inactiveMin >= COLD_LEAD_STEP1_MIN) nextStep = 1;
+      else if (cold.followup_step < 2 && inactiveMin >= COLD_LEAD_STEP2_MIN) nextStep = 2;
+      else if (cold.followup_step < 3 && inactiveMin >= COLD_LEAD_STEP3_MIN) nextStep = 3;
+
+      if (!nextStep) {
+        await saveSession(userId, session);
+        continue;
+      }
+
+      const message = buildColdLeadFollowupMessage(session, nextStep);
+      if (!message) {
+        await saveSession(userId, session);
+        continue;
+      }
+
+      await sendWhatsAppText(userId, message, "BOT");
+      session.coldLead.followup_step = nextStep;
+      session.coldLead.last_followup_at = new Date().toISOString();
+      session.coldLead.last_outbound_at = new Date().toISOString();
+      if (nextStep >= 3) session.coldLead.active = false;
+
+      await saveSession(userId, session);
+    }
+  } catch (e) {
+    console.error("coldLeadFollowupLoop error:", e?.response?.data || e?.message || e);
+  }
+}
+
 async function maybeHandleAdvisorSearch({ session, userText }) {
   const criteria = await extractLeadCriteriaWithAI(userText, session);
   if (!criteria) return { handled: false };
@@ -1042,6 +1220,11 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
 
   const matches = findMatchingProperties(mergedProfile, AI_PROPERTY_RECOMMENDATION_LIMIT);
   if (!matches.length) {
+    activateColdLead(session, {
+      status: "interested",
+      category: mergedProfile.category || "",
+      ai_summary: "no_exact_match",
+    });
     return {
       handled: true,
       message:
@@ -1054,6 +1237,11 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
 
   session.lastRecommendations = matches;
   session.state = "await_property_choice";
+  activateColdLead(session, {
+    status: "interested",
+    category: mergedProfile.category || "",
+    ai_summary: matches.map((p) => p.title).join(", "),
+  });
 
   if (matches.length === 1 && criteria.wants_visit) {
     const property = matches[0];
@@ -1061,6 +1249,12 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
     session.pendingCategory = property.category || null;
     session.lastRecommendations = [];
     session.state = "await_day";
+    activateColdLead(session, {
+      status: "selected_property",
+      selected_property_id: property.id || "",
+      selected_property_title: property.title || "",
+      category: property.category || "",
+    });
     return {
       handled: true,
       property,
@@ -1169,6 +1363,7 @@ function findPropertyByAny(value) {
   if (PROPERTY_BY_RETAILER_ID[raw]) return PROPERTY_BY_RETAILER_ID[raw];
   const codeNorm = normalizeText(raw);
   if (PROPERTY_BY_CODE[codeNorm]) return PROPERTY_BY_CODE[codeNorm];
+  if (PROPERTY_BY_TITLE[codeNorm]) return PROPERTY_BY_TITLE[codeNorm];
 
   return (
     PROPERTY_CATALOG.find((p) => normalizeText(p.title) === codeNorm) ||
@@ -2075,6 +2270,7 @@ async function finalizeVisitBookingAndNotify({ from, session }) {
     visit_id: visit.visit_id,
   });
 
+  stopColdLead(session, "visit_booked");
   session.lastVisit = visit;
   session.state = "post_booking";
   session.lastSlots = [];
@@ -2186,6 +2382,8 @@ app.post("/webhook", async (req, res) => {
       mediaUrl: inboundMetaWithMediaUrl?.mediaUrl || undefined,
     });
 
+    touchColdLeadInbound(session);
+
     const wantsCancel = looksLikeCancel(tNorm) || isChoice(tNorm, 3);
     const wantsReschedule = looksLikeReschedule(tNorm) || isChoice(tNorm, 2);
     const wantsConfirm = looksLikeConfirm(tNorm) || isChoice(tNorm, 1);
@@ -2201,10 +2399,17 @@ app.post("/webhook", async (req, res) => {
       "menú principal",
     ].some((k) => tNorm === k || tNorm.includes(k));
 
+    if (looksLikeStopFollowUp(tNorm)) {
+      stopColdLead(session, "user_opt_out");
+      await sendWhatsAppText(from, `Entendido ✅ No te enviaré más seguimientos automáticos. Si más adelante deseas retomar, solo escribe *catálogo*.`);
+      return res.sendStatus(200);
+    }
+
     if (wantsRestart) {
       session.lastVisit = null;
       clearVisitFlow(session);
       session.greeted = true;
+      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, welcomeText());
       return res.sendStatus(200);
     }
@@ -2232,12 +2437,14 @@ app.post("/webhook", async (req, res) => {
       looksLikeCatalogRequest(tNorm);
 
     if (session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
+      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, quickHelpText());
       return res.sendStatus(200);
     }
 
     if (!session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
       session.greeted = true;
+      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, welcomeText());
       return res.sendStatus(200);
     }
@@ -2245,6 +2452,7 @@ app.post("/webhook", async (req, res) => {
     if (!session.greeted && session.state === "idle") session.greeted = true;
 
     if (looksLikeHuman(tNorm)) {
+      stopColdLead(session, "human_requested");
       await handoffToHumanTool({ summary: `Solicitud de asesor: ${userText}` });
       await sendWhatsAppText(from, `Perfecto ✅ Te paso con un asesor para continuar.`);
       return res.sendStatus(200);
@@ -2262,6 +2470,7 @@ app.post("/webhook", async (req, res) => {
 
       if (wantsCancel) {
         await cancelVisitTool({ visit_id: v.visit_id, reason: userText });
+        stopColdLead(session, "visit_cancelled");
         await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, escribe *catálogo* y te muestro opciones.`);
         session.lastVisit = null;
         clearVisitFlow(session);
@@ -2291,6 +2500,13 @@ app.post("/webhook", async (req, res) => {
             category: v.category,
           };
 
+        activateColdLead(session, {
+          status: "selected_property",
+          selected_property_id: session.selectedProperty?.id || "",
+          selected_property_title: session.selectedProperty?.title || "",
+          category: session.selectedProperty?.category || "",
+        });
+
         session.state = "await_day";
         session.lastSlots = [];
         session.lastDisplaySlots = [];
@@ -2311,6 +2527,7 @@ app.post("/webhook", async (req, res) => {
       if (looksLikeNewVisit(tNorm)) {
         session.lastVisit = null;
         clearVisitFlow(session);
+        activateColdLead(session, { status: "browsing" });
         await sendWhatsAppText(from, `Claro ✅ Vamos a agendar una nueva visita.`);
         await sendPropertyCategoriesList(from);
         return res.sendStatus(200);
@@ -2334,7 +2551,7 @@ app.post("/webhook", async (req, res) => {
     if (session.state === "await_property_choice" && session.lastRecommendations?.length) {
       const pickedProperty = tryPickRecommendedPropertyFromUserText(session, userText);
       if (!pickedProperty) {
-        await sendWhatsAppText(from, `Responde con el *número* o con el *nombre* de la propiedad que te interesa y te ayudo con la visita.`);
+        await sendWhatsAppText(from, `Responde con el *número* o con el *nombre* de la propiedad que te interesa y te ayudo con la visita.\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
         return res.sendStatus(200);
       }
 
@@ -2342,6 +2559,12 @@ app.post("/webhook", async (req, res) => {
       session.pendingCategory = pickedProperty.category || null;
       session.lastRecommendations = [];
       session.state = "await_day";
+      activateColdLead(session, {
+        status: "selected_property",
+        selected_property_id: pickedProperty.id || "",
+        selected_property_title: pickedProperty.title || "",
+        category: pickedProperty.category || "",
+      });
       await reportLeadEventToCrm({
         to: from,
         action: "property_selected",
@@ -2359,6 +2582,7 @@ app.post("/webhook", async (req, res) => {
         session.lastVisit = null;
         clearVisitFlow(session);
         session.greeted = true;
+        activateColdLead(session, { status: "browsing" });
         await sendWelcomeAndCatalog(from, welcomeText());
         return res.sendStatus(200);
       }
@@ -2380,7 +2604,7 @@ app.post("/webhook", async (req, res) => {
       if (!picked) {
         await sendWhatsAppText(
           from,
-          `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).`
+          `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).\n\nSi prefieres empezar de nuevo, escribe *inicio*.`
         );
         return res.sendStatus(200);
       }
@@ -2410,6 +2634,7 @@ app.post("/webhook", async (req, res) => {
           budget: session.reschedule.budget,
         });
 
+        stopColdLead(session, "visit_rescheduled");
         session.lastVisit = {
           visit_id: session.reschedule.visit_id,
           start: picked.start,
@@ -2471,19 +2696,19 @@ app.post("/webhook", async (req, res) => {
 
     if (session.state === "await_name" && session.selectedSlot) {
       if (tNorm.length < 3 || ["si", "sí", "ok", "listo"].includes(tNorm)) {
-        await sendWhatsAppText(from, `Por favor, envíame tu *nombre completo* 🙂`);
+        await sendWhatsAppText(from, `Por favor, envíame tu *nombre completo* 🙂\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
         return res.sendStatus(200);
       }
       session.pendingName = userText;
       session.state = "await_phone";
-      await sendWhatsAppText(from, `Gracias. Ahora envíame tu *número de teléfono* (ej: 829XXXXXXX).`);
+      await sendWhatsAppText(from, `Gracias. Ahora envíame tu *número de teléfono* (ej: 829XXXXXXX).\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
       return res.sendStatus(200);
     }
 
     if (session.state === "await_phone" && session.selectedSlot && session.pendingName) {
       const phoneDigits = userText.replace(/[^\d]/g, "");
       if (phoneDigits.length < 8) {
-        await sendWhatsAppText(from, `Ese número parece incompleto 🙏\nEnvíame el teléfono así: 829XXXXXXX`);
+        await sendWhatsAppText(from, `Ese número parece incompleto 🙏\nEnvíame el teléfono así: 829XXXXXXX\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
         return res.sendStatus(200);
       }
       session.pendingPhone = phoneDigits;
@@ -2502,12 +2727,17 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (looksLikeCatalogRequest(tNorm)) {
+      activateColdLead(session, { status: "browsing" });
       await sendPropertyCategoriesList(from);
       return res.sendStatus(200);
     }
 
     if (detectedCategoryEarly && !detectedPropertyEarly) {
       session.pendingCategory = detectedCategoryEarly;
+      activateColdLead(session, {
+        status: "interested",
+        category: detectedCategoryEarly,
+      });
       await sendCatalogForCategory(from, detectedCategoryEarly, session);
       return res.sendStatus(200);
     }
@@ -2516,6 +2746,12 @@ app.post("/webhook", async (req, res) => {
       session.selectedProperty = detectedPropertyEarly;
       session.pendingCategory = detectedPropertyEarly.category || null;
       session.lastRecommendations = [];
+      activateColdLead(session, {
+        status: "selected_property",
+        selected_property_id: detectedPropertyEarly.id || "",
+        selected_property_title: detectedPropertyEarly.title || "",
+        category: detectedPropertyEarly.category || "",
+      });
       await reportLeadEventToCrm({
         to: from,
         action: "property_selected",
@@ -2576,23 +2812,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    if (looksLikeHuman(tNorm)) {
-      await reportLeadEventToCrm({
-        to: from,
-        action: "human_requested",
-        property: session.selectedProperty,
-        lead_name: session.pendingName || session.lastVisit?.lead_name || "",
-        phone: session.pendingPhone || session.lastVisit?.phone || "",
-        zone_interest: session.pendingZone || session.aiProfile?.zone_interest || session.lastVisit?.zone_interest || "",
-        budget: session.pendingBudget || session.aiProfile?.budget || session.lastVisit?.budget || "",
-      });
-      await sendWhatsAppText(
-        from,
-        `Perfecto ✅ Voy a dejar tu caso listo para que un asesor te continúe ayudando. Mientras tanto, también puedo recomendarte propiedades o agendar una visita si ya viste una que te interese en el catálogo.`
-      );
-      return res.sendStatus(200);
-    }
-
     const advisor = await maybeHandleAdvisorSearch({ session, userText });
     if (advisor?.handled) {
       if (advisor?.property) {
@@ -2630,6 +2849,7 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", (_req, res) => res.send("OK"));
 app.get("/health", (_req, res) => res.status(200).send("ok"));
+app.get("/ping", (_req, res) => res.status(200).send("pong"));
 
 async function reminderLoop() {
   try {
@@ -2693,6 +2913,7 @@ async function reminderLoop() {
 app.get("/tick", async (_req, res) => {
   try {
     await reminderLoop();
+    await coldLeadFollowupLoop();
   } catch {}
   return res.status(200).send("tick ok");
 });
