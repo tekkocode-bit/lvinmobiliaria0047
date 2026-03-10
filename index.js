@@ -424,6 +424,28 @@ function groupPropertiesByCategory(properties) {
 
 const PROPERTY_GROUPS = groupPropertiesByCategory(PROPERTY_CATALOG);
 
+function getPropertiesForMenuCategory(categoryKey) {
+  const normalizedInput = normalizeText(categoryKey || "");
+  const resolvedKey =
+    PROPERTY_CATEGORIES_BY_ID[categoryKey]?.key ||
+    PROPERTY_CATEGORIES.find((c) => normalizeText(c.id) === normalizedInput)?.key ||
+    PROPERTY_CATEGORIES.find((c) => normalizeText(c.title) === normalizedInput)?.key ||
+    normalizedInput;
+
+  if (!resolvedKey) return [];
+
+  if (resolvedKey === "venta" || resolvedKey === "alquiler") {
+    return PROPERTY_CATALOG.filter((p) => {
+      const op = normalizeOperationKey(p.operation || p.category || "");
+      return p.active && op === resolvedKey;
+    });
+  }
+
+  return PROPERTY_CATALOG.filter((p) => {
+    return p.active && normalizeText(p.category || "") === resolvedKey;
+  });
+}
+
 function normalizeRedisUrl(url) {
   const u = String(url || "").trim();
   if (!u) return "";
@@ -749,7 +771,9 @@ function getCalendarClient() {
 }
 
 function categoryTitle(categoryKey) {
-  return PROPERTY_CATEGORIES_BY_KEY[categoryKey]?.title || categoryKey || "propiedades";
+  if (PROPERTY_CATEGORIES_BY_KEY[categoryKey]?.title) return PROPERTY_CATEGORIES_BY_KEY[categoryKey].title;
+  if (PROPERTY_CATEGORIES_BY_ID[categoryKey]?.title) return PROPERTY_CATEGORIES_BY_ID[categoryKey].title;
+  return categoryKey || "propiedades";
 }
 
 function propertyOperationLabel(operation) {
@@ -1604,6 +1628,9 @@ function detectCategoryKeyFromUser(text) {
   if (!t) return null;
   if (PROPERTY_CATEGORIES_BY_ID[text]) return PROPERTY_CATEGORIES_BY_ID[text].key;
 
+  const byNormalizedId = PROPERTY_CATEGORIES.find((c) => normalizeText(c.id) === t);
+  if (byNormalizedId) return byNormalizedId.key;
+
   for (const c of PROPERTY_CATEGORIES) {
     if (t === normalizeText(c.title)) return c.key;
     if (t.includes(normalizeText(c.title))) return c.key;
@@ -1759,7 +1786,8 @@ async function sendWelcomeAndCatalog(to, introText = null) {
 }
 
 async function sendCatalogForCategory(to, categoryKey, session = null) {
-  const properties = (PROPERTY_GROUPS[categoryKey] || []).slice(0, 30);
+  const properties = getPropertiesForMenuCategory(categoryKey).slice(0, 30);
+
   if (!properties.length) {
     await sendWhatsAppText(
       to,
