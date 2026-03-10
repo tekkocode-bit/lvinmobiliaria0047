@@ -403,6 +403,7 @@ function normalizeProperty(raw, index) {
 const PROPERTY_CATALOG = (safeJson(process.env.PROPERTY_CATALOG_JSON, []) || [])
   .map(normalizeProperty)
   .filter((p) => p.active);
+
 console.log("TOTAL PROPERTY_CATALOG:", PROPERTY_CATALOG.length);
 console.log(
   "CASAS:",
@@ -1127,6 +1128,7 @@ function looksLikePropertyQuestion(textNorm) {
     "cuánto cuesta",
     "valor",
     "costo",
+
     "metros",
     "metro cuadrado",
     "metraje",
@@ -1137,6 +1139,7 @@ function looksLikePropertyQuestion(textNorm) {
     "solar",
     "construccion",
     "construcción",
+
     "habitacion",
     "habitaciones",
     "cuarto",
@@ -1145,43 +1148,88 @@ function looksLikePropertyQuestion(textNorm) {
     "banos",
     "baño",
     "baños",
+
     "ano construccion",
     "año construccion",
     "construida",
     "terminada",
     "reparaciones",
+    "estado",
+    "condicion",
+    "condición",
+
     "cloaca",
     "asfaltada",
+    "calle asfaltada",
+
     "queda",
     "ubicacion",
     "ubicación",
+    "ubicada",
     "direccion",
     "dirección",
+    "por donde queda",
+    "por dónde queda",
+    "donde esta",
+    "dónde está",
+
+    "titulo",
+    "título",
     "titulo deslindado",
     "título deslindado",
+
     "hipoteca",
     "carga legal",
+    "gravamen",
+    "legal",
+    "legalidad",
+
     "documentos",
+    "documentacion",
+    "documentación",
+    "papeles",
     "al dia",
     "al día",
+
     "financiamiento",
+    "financiacion",
+    "financiación",
     "banco",
+    "financiar",
+    "se puede financiar",
+
     "inicial",
+    "separacion",
+    "separación",
     "facilidades de pago",
+    "pago con el propietario",
     "cuota",
+    "mensual",
+    "mensualidad",
+
+    "traspaso",
+    "costo de traspaso",
+
     "sector",
     "colegios",
     "hospitales",
     "supermercados",
+    "cerca",
+    "lugares cercanos",
     "zona segura",
     "segura",
+    "seguridad",
     "acceso",
     "transporte",
+
     "pasos para comprar",
     "proceso de compra",
+    "como comprar",
+    "cómo comprar",
     "cuanto tiempo tarda",
     "cuánto tiempo tarda",
-    "traspaso",
+    "tiempo del proceso",
+
     "amenidades",
     "que incluye",
     "qué incluye",
@@ -1255,7 +1303,20 @@ function answerPropertyQuestionHeuristic(property, userText) {
     return `Sobre la calle: *${yesNoUnknown(property?.paved_street)}*.`;
   }
 
-  if (hasAnyKeyword(t, ["queda", "ubicacion", "ubicación", "direccion", "dirección", "por donde queda", "por dónde queda"])) {
+  if (
+    hasAnyKeyword(t, [
+      "queda",
+      "ubicacion",
+      "ubicación",
+      "ubicada",
+      "direccion",
+      "dirección",
+      "por donde queda",
+      "por dónde queda",
+      "donde esta",
+      "dónde está",
+    ])
+  ) {
     const parts = [];
     if (property?.location) parts.push(`zona: *${property.location}*`);
     if (property?.exact_address) parts.push(`dirección: *${property.exact_address}*`);
@@ -1266,22 +1327,22 @@ function answerPropertyQuestionHeuristic(property, userText) {
       : buildUnknownPropertyAnswer(property, "la ubicación exacta");
   }
 
-  if (hasAnyKeyword(t, ["titulo deslindado", "título deslindado"])) {
-    return `Título deslindado: *${yesNoUnknown(property?.title_deed)}*.`;
+  if (hasAnyKeyword(t, ["titulo", "título", "titulo deslindado", "título deslindado"])) {
+    return `Título / deslinde: *${yesNoUnknown(property?.title_deed)}*.`;
   }
 
-  if (hasAnyKeyword(t, ["hipoteca", "carga legal", "gravamen"])) {
+  if (hasAnyKeyword(t, ["hipoteca", "carga legal", "gravamen", "legal", "legalidad"])) {
     if (property?.legal_status) {
       return `Sobre la parte legal de *${name}*: ${property.legal_status}.`;
     }
     return `Hipoteca o carga legal: *${yesNoUnknown(property?.has_mortgage)}*.`;
   }
 
-  if (hasAnyKeyword(t, ["documentos", "al dia", "al día"])) {
+  if (hasAnyKeyword(t, ["documentos", "documentacion", "documentación", "papeles", "al dia", "al día"])) {
     return `Documentos al día: *${yesNoUnknown(property?.documents_up_to_date)}*.`;
   }
 
-  if (hasAnyKeyword(t, ["financiamiento", "banco", "financiar"])) {
+  if (hasAnyKeyword(t, ["financiamiento", "financiacion", "financiación", "banco", "financiar", "se puede financiar"])) {
     const answer = `Financiamiento bancario: *${yesNoUnknown(property?.bank_financing)}*.`;
     const note = property?.bank_financing_note ? ` ${property.bank_financing_note}` : "";
     return `${answer}${note}`.trim();
@@ -3138,6 +3199,17 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (session.state === "await_day") {
+        if (looksLikePropertyQuestion(tNorm)) {
+          const faqAnswer = await answerPropertyQuestionWithAI(session.selectedProperty, userText);
+          await sendWhatsAppText(
+            from,
+            `${faqAnswer}\n\nSi quieres agendar la visita de *${propertyPublicLabel(
+              session.selectedProperty
+            )}*, dime el día.\nEj: "mañana", "viernes", "14 de junio".\n\nTambién puedes escribir *inicio* para volver al catálogo.`
+          );
+          return res.sendStatus(200);
+        }
+
         await sendWhatsAppText(
           from,
           `Para elegir el día, puedes escribir: "mañana", "viernes", "próximo martes", "14 de junio" o "en junio".\n\nTambién puedes hacer una pregunta sobre esta propiedad o escribir *inicio* para volver al catálogo.`
