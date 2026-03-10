@@ -403,6 +403,23 @@ function normalizeProperty(raw, index) {
 const PROPERTY_CATALOG = (safeJson(process.env.PROPERTY_CATALOG_JSON, []) || [])
   .map(normalizeProperty)
   .filter((p) => p.active);
+console.log("TOTAL PROPERTY_CATALOG:", PROPERTY_CATALOG.length);
+console.log(
+  "CASAS:",
+  PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "casas").length
+);
+console.log(
+  "LOCALES:",
+  PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "locales_comerciales").length
+);
+console.log(
+  "VENTA:",
+  PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "venta").length
+);
+console.log(
+  "ALQUILER:",
+  PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "alquiler").length
+);
 
 const PROPERTY_CATEGORIES_BY_ID = Object.fromEntries(PROPERTY_CATEGORIES.map((c) => [c.id, c]));
 const PROPERTY_CATEGORIES_BY_KEY = Object.fromEntries(PROPERTY_CATEGORIES.map((c) => [c.key, c]));
