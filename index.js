@@ -88,6 +88,42 @@ function sanitizeFileName(name, fallback = "file") {
   return raw.replace(/[\\/:*?"<>|]+/g, "_");
 }
 
+function cleanText(value) {
+  return String(value ?? "").trim();
+}
+
+function safeArrayText(value) {
+  if (Array.isArray(value)) return value.map((v) => cleanText(v)).filter(Boolean);
+  return String(value || "")
+    .split(/[\n,|•]+/g)
+    .map((v) => cleanText(v))
+    .filter(Boolean);
+}
+
+function toBoolOrNull(value) {
+  if (value === true || value === false) return value;
+  const t = normalizeText(value);
+  if (!t) return null;
+
+  if (["si", "sí", "true", "1", "yes", "aplica", "incluye", "disponible", "tiene"].includes(t)) return true;
+  if (["no", "false", "0", "none", "no aplica", "no disponible", "no tiene"].includes(t)) return false;
+
+  return null;
+}
+
+function yesNoUnknown(value, yes = "Sí", no = "No", unknown = "No especificado") {
+  const b = toBoolOrNull(value);
+  if (b === true) return yes;
+  if (b === false) return no;
+  const t = cleanText(value);
+  return t || unknown;
+}
+
+function hasAnyKeyword(textNorm, keywords = []) {
+  const t = normalizeText(textNorm || "");
+  return keywords.some((k) => t.includes(normalizeText(k)));
+}
+
 function defaultWorkHours() {
   return {
     mon: { start: "08:00", end: "17:30" },
@@ -123,23 +159,6 @@ function defaultPropertyCategories() {
     { key: "casas", title: "Casas", id: "cat_casas" },
     { key: "apartamentos", title: "Apartamentos", id: "cat_apartamentos" },
   ];
-}
-
-function defaultColdLead() {
-  return {
-    active: false,
-    status: "",
-    started_at: "",
-    last_inbound_at: "",
-    last_outbound_at: "",
-    last_followup_at: "",
-    followup_step: 0,
-    selected_property_id: "",
-    selected_property_title: "",
-    category: "",
-    ai_summary: "",
-    stopped: false,
-  };
 }
 
 function getZonedParts(date, timeZone) {
@@ -292,11 +311,6 @@ const META_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || process.env.MET
 const REDIS_URL_RAW = (process.env.REDIS_URL || "").trim();
 const SESSION_TTL_SEC = parseInt(process.env.SESSION_TTL_SEC || String(60 * 60 * 24 * 14), 10);
 const SESSION_PREFIX = process.env.SESSION_PREFIX || "tekko:realestate:sess:";
-const COLD_LEAD_SET_KEY = process.env.COLD_LEAD_SET_KEY || "tekko:realestate:coldleads";
-const COLD_LEAD_ENABLED = (process.env.COLD_LEAD_ENABLED || "1") === "1";
-const COLD_LEAD_STEP1_MIN = parseInt(process.env.COLD_LEAD_STEP1_MIN || "30", 10);
-const COLD_LEAD_STEP2_MIN = parseInt(process.env.COLD_LEAD_STEP2_MIN || "240", 10);
-const COLD_LEAD_STEP3_MIN = parseInt(process.env.COLD_LEAD_STEP3_MIN || "1380", 10);
 
 const PROPERTY_CATEGORIES = safeJson(process.env.PROPERTY_CATEGORIES_JSON, null) || defaultPropertyCategories();
 
@@ -304,6 +318,7 @@ function normalizeProperty(raw, index) {
   const id = String(raw?.id || `prop_${index + 1}`);
   const retailerId = String(raw?.retailer_id || raw?.product_retailer_id || raw?.code || id);
   const code = String(raw?.code || raw?.reference || retailerId || id);
+
   return {
     id,
     retailer_id: retailerId,
@@ -316,12 +331,65 @@ function normalizeProperty(raw, index) {
     price: raw?.price ?? "",
     currency: String(raw?.currency || ""),
     location: String(raw?.location || raw?.zone || ""),
+    exact_address: cleanText(raw?.exact_address || raw?.direccion || raw?.direccion_exacta),
+    exact_location_reference: cleanText(
+      raw?.exact_location_reference || raw?.referencia_ubicacion || raw?.ubicacion_referencia
+    ),
+
     bedrooms: raw?.bedrooms ?? raw?.rooms ?? "",
     bathrooms: raw?.bathrooms ?? "",
-    area_m2: raw?.area_m2 ?? raw?.area ?? "",
-    short_description: String(raw?.short_description || raw?.description || ""),
-    features: Array.isArray(raw?.features) ? raw.features.map((f) => String(f || "").trim()).filter(Boolean) : [],
     parking: raw?.parking ?? raw?.parkings ?? "",
+    floor_level: cleanText(raw?.floor_level || raw?.nivel || raw?.piso),
+
+    area_m2: raw?.area_m2 ?? raw?.area ?? "",
+    lot_m2: raw?.lot_m2 ?? raw?.solar_m2 ?? raw?.terreno_m2 ?? raw?.metros_solar ?? "",
+    construction_m2:
+      raw?.construction_m2 ?? raw?.construccion_m2 ?? raw?.metros_construccion ?? "",
+
+    short_description: String(raw?.short_description || raw?.description || ""),
+    features: safeArrayText(raw?.features),
+
+    year_built: cleanText(raw?.year_built || raw?.ano_construccion || raw?.año_construccion),
+    condition: cleanText(raw?.condition || raw?.estado_propiedad || raw?.terminacion || raw?.condicion),
+
+    title_deed: raw?.title_deed ?? raw?.titulo_deslindado ?? raw?.title_deed_available ?? "",
+    has_mortgage: raw?.has_mortgage ?? raw?.hipoteca ?? raw?.carga_legal ?? "",
+    legal_status: cleanText(raw?.legal_status || raw?.estado_legal || raw?.legalidad),
+    documents_up_to_date: raw?.documents_up_to_date ?? raw?.documentos_al_dia ?? "",
+
+    bank_financing:
+      raw?.bank_financing ?? raw?.acepta_financiamiento ?? raw?.financiamiento_bancario ?? "",
+    bank_financing_note: cleanText(
+      raw?.bank_financing_note || raw?.financiamiento_nota || raw?.financing_notes
+    ),
+    down_payment: cleanText(
+      raw?.down_payment || raw?.inicial_requerido || raw?.separacion || raw?.separacion_requerida
+    ),
+    payment_facilities: cleanText(
+      raw?.payment_facilities || raw?.facilidades_pago || raw?.owner_payment_facilities
+    ),
+    estimated_monthly_fee: cleanText(
+      raw?.estimated_monthly_fee || raw?.cuota_aproximada || raw?.monthly_fee_estimate
+    ),
+    transfer_cost: cleanText(raw?.transfer_cost || raw?.costo_traspaso),
+
+    sewer: raw?.sewer ?? raw?.cloaca ?? "",
+    paved_street: raw?.paved_street ?? raw?.calle_asfaltada ?? "",
+    water_service: raw?.water_service ?? raw?.servicio_agua ?? "",
+    electric_service:
+      raw?.electric_service ?? raw?.servicio_energia ?? raw?.servicio_electrica ?? "",
+
+    nearby_places: safeArrayText(raw?.nearby_places || raw?.lugares_cercanos),
+    safety: cleanText(raw?.safety || raw?.seguridad_zona || raw?.zona_segura),
+    transport_access: cleanText(raw?.transport_access || raw?.acceso_transporte),
+
+    purchase_steps: cleanText(raw?.purchase_steps || raw?.pasos_compra || raw?.proceso_compra),
+    purchase_timeline: cleanText(
+      raw?.purchase_timeline || raw?.tiempo_proceso || raw?.proceso_tiempo
+    ),
+
+    faq: typeof raw?.faq === "object" && raw?.faq ? raw.faq : {},
+
     status: String(raw?.status || (raw?.active === false ? "inactiva" : "disponible")),
     duration_min: Number(raw?.duration_min || 0),
     active:
@@ -400,7 +468,6 @@ function defaultSession() {
       purpose: "",
       timeline: "",
     },
-    coldLead: defaultColdLead(),
     lastVisit: null,
     greeted: false,
     lastMsgId: null,
@@ -441,17 +508,6 @@ function sanitizeSession(session) {
       bathrooms: Number.isFinite(Number(session.aiProfile?.bathrooms)) ? Number(session.aiProfile.bathrooms) : null,
     };
   }
-  if (!session.coldLead || typeof session.coldLead !== "object") {
-    session.coldLead = defaultColdLead();
-  } else {
-    session.coldLead = {
-      ...defaultColdLead(),
-      ...session.coldLead,
-      active: Boolean(session.coldLead.active),
-      stopped: Boolean(session.coldLead.stopped),
-      followup_step: Number.isFinite(Number(session.coldLead.followup_step)) ? Number(session.coldLead.followup_step) : 0,
-    };
-  }
   if (!session.reschedule || typeof session.reschedule !== "object") {
     session.reschedule = defaultSession().reschedule;
   }
@@ -481,8 +537,6 @@ async function saveSession(userId, session) {
   }
   const key = `${SESSION_PREFIX}${userId}`;
   await redis.set(key, JSON.stringify(clean), "EX", SESSION_TTL_SEC);
-  if (clean.coldLead?.active && !clean.coldLead?.stopped) await redis.sadd(COLD_LEAD_SET_KEY, userId);
-  else await redis.srem(COLD_LEAD_SET_KEY, userId);
 }
 
 function bothubHmacStable(payload, secret) {
@@ -762,6 +816,74 @@ function propertySummary(property) {
   return parts.join("\n");
 }
 
+function propertyFaqSnapshot(property) {
+  return {
+    title: property?.title || "",
+    code: property?.code || "",
+    category: property?.category || "",
+    operation: property?.operation || "",
+    price: property?.price || "",
+    currency: property?.currency || "",
+    location: property?.location || "",
+    exact_address: property?.exact_address || "",
+    exact_location_reference: property?.exact_location_reference || "",
+    bedrooms: property?.bedrooms ?? "",
+    bathrooms: property?.bathrooms ?? "",
+    parking: property?.parking ?? "",
+    floor_level: property?.floor_level || "",
+    area_m2: property?.area_m2 ?? "",
+    lot_m2: property?.lot_m2 ?? "",
+    construction_m2: property?.construction_m2 ?? "",
+    short_description: property?.short_description || "",
+    features: Array.isArray(property?.features) ? property.features : [],
+    year_built: property?.year_built || "",
+    condition: property?.condition || "",
+    title_deed: property?.title_deed ?? "",
+    has_mortgage: property?.has_mortgage ?? "",
+    legal_status: property?.legal_status || "",
+    documents_up_to_date: property?.documents_up_to_date ?? "",
+    bank_financing: property?.bank_financing ?? "",
+    bank_financing_note: property?.bank_financing_note || "",
+    down_payment: property?.down_payment || "",
+    payment_facilities: property?.payment_facilities || "",
+    estimated_monthly_fee: property?.estimated_monthly_fee || "",
+    transfer_cost: property?.transfer_cost || "",
+    sewer: property?.sewer ?? "",
+    paved_street: property?.paved_street ?? "",
+    water_service: property?.water_service ?? "",
+    electric_service: property?.electric_service ?? "",
+    nearby_places: Array.isArray(property?.nearby_places) ? property.nearby_places : [],
+    safety: property?.safety || "",
+    transport_access: property?.transport_access || "",
+    purchase_steps: property?.purchase_steps || "",
+    purchase_timeline: property?.purchase_timeline || "",
+    faq: property?.faq || {},
+  };
+}
+
+function propertyFeatureListText(property, limit = 12) {
+  const out = [];
+
+  if (Array.isArray(property?.features)) out.push(...property.features);
+  if (property?.parking !== "" && property?.parking !== null && property?.parking !== undefined) {
+    out.push(`${property.parking} parqueo(s)`);
+  }
+
+  const water = toBoolOrNull(property?.water_service);
+  if (water === true) out.push("servicio de agua");
+
+  const electric = toBoolOrNull(property?.electric_service);
+  if (electric === true) out.push("servicio eléctrico");
+
+  const paved = toBoolOrNull(property?.paved_street);
+  if (paved === true) out.push("calle asfaltada");
+
+  const sewer = toBoolOrNull(property?.sewer);
+  if (sewer === true) out.push("cloaca");
+
+  return [...new Set(out.filter(Boolean))].slice(0, limit);
+}
+
 function parseNumericValue(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -957,6 +1079,359 @@ function shouldUseAdvisorSearch(textNorm) {
   ].some((k) => t.includes(k));
 }
 
+function looksLikePropertyQuestion(textNorm) {
+  return hasAnyKeyword(textNorm, [
+    "precio",
+    "cuanto cuesta",
+    "cuánto cuesta",
+    "valor",
+    "costo",
+    "metros",
+    "metro cuadrado",
+    "metraje",
+    "m2",
+    "mt2",
+    "area",
+    "área",
+    "solar",
+    "construccion",
+    "construcción",
+    "habitacion",
+    "habitaciones",
+    "cuarto",
+    "cuartos",
+    "bano",
+    "banos",
+    "baño",
+    "baños",
+    "ano construccion",
+    "año construccion",
+    "construida",
+    "terminada",
+    "reparaciones",
+    "cloaca",
+    "asfaltada",
+    "queda",
+    "ubicacion",
+    "ubicación",
+    "direccion",
+    "dirección",
+    "titulo deslindado",
+    "título deslindado",
+    "hipoteca",
+    "carga legal",
+    "documentos",
+    "al dia",
+    "al día",
+    "financiamiento",
+    "banco",
+    "inicial",
+    "facilidades de pago",
+    "cuota",
+    "sector",
+    "colegios",
+    "hospitales",
+    "supermercados",
+    "zona segura",
+    "segura",
+    "acceso",
+    "transporte",
+    "pasos para comprar",
+    "proceso de compra",
+    "cuanto tiempo tarda",
+    "cuánto tiempo tarda",
+    "traspaso",
+    "amenidades",
+    "que incluye",
+    "qué incluye",
+    "que tiene",
+    "qué tiene",
+  ]);
+}
+
+function buildUnknownPropertyAnswer(property, topic) {
+  return `Ahora mismo no tengo confirmado *${topic}* de *${propertyPublicLabel(
+    property
+  )}*. Si quieres, te paso con un asesor para validártelo.`;
+}
+
+function answerPropertyQuestionHeuristic(property, userText) {
+  const t = normalizeText(userText);
+  const name = propertyPublicLabel(property);
+
+  if (property?.faq && typeof property.faq === "object") {
+    for (const [key, value] of Object.entries(property.faq)) {
+      if (cleanText(key) && cleanText(value) && t.includes(normalizeText(key))) {
+        return String(value);
+      }
+    }
+  }
+
+  if (hasAnyKeyword(t, ["precio", "cuanto cuesta", "cuánto cuesta", "valor", "costo"])) {
+    return property?.price !== ""
+      ? `El precio de *${name}* es *${formatMoney(property.price, property.currency)}*.`
+      : buildUnknownPropertyAnswer(property, "el precio");
+  }
+
+  if (hasAnyKeyword(t, ["metros", "metro cuadrado", "metraje", "m2", "mt2", "area", "área", "solar", "construccion", "construcción"])) {
+    const parts = [];
+    if (property?.lot_m2 !== "") parts.push(`solar de *${property.lot_m2} m²*`);
+    if (property?.construction_m2 !== "") parts.push(`construcción de *${property.construction_m2} m²*`);
+    if (!parts.length && property?.area_m2 !== "") parts.push(`área de *${property.area_m2} m²*`);
+
+    return parts.length
+      ? `Esta propiedad tiene ${parts.join(" y ")}.`
+      : buildUnknownPropertyAnswer(property, "los metros cuadrados");
+  }
+
+  if (hasAnyKeyword(t, ["habitacion", "habitaciones", "cuarto", "cuartos", "bano", "banos", "baño", "baños"])) {
+    const parts = [];
+    if (property?.bedrooms !== "") parts.push(`*${property.bedrooms}* habitación(es)`);
+    if (property?.bathrooms !== "") parts.push(`*${property.bathrooms}* baño(s)`);
+
+    return parts.length
+      ? `*${name}* tiene ${parts.join(" y ")}.`
+      : buildUnknownPropertyAnswer(property, "la cantidad de habitaciones y baños");
+  }
+
+  if (hasAnyKeyword(t, ["ano construccion", "año construccion", "construida", "cuando se construyo", "cuándo se construyó"])) {
+    return property?.year_built
+      ? `La propiedad tiene registrado como año de construcción: *${property.year_built}*.`
+      : buildUnknownPropertyAnswer(property, "el año de construcción");
+  }
+
+  if (hasAnyKeyword(t, ["terminada", "reparaciones", "estado", "condicion", "condición"])) {
+    return property?.condition
+      ? `Sobre el estado de *${name}*: ${property.condition}.`
+      : buildUnknownPropertyAnswer(property, "el estado actual de la propiedad");
+  }
+
+  if (hasAnyKeyword(t, ["cloaca"])) {
+    return `Sobre la cloaca: *${yesNoUnknown(property?.sewer)}*.`;
+  }
+
+  if (hasAnyKeyword(t, ["asfaltada", "calle asfaltada"])) {
+    return `Sobre la calle: *${yesNoUnknown(property?.paved_street)}*.`;
+  }
+
+  if (hasAnyKeyword(t, ["queda", "ubicacion", "ubicación", "direccion", "dirección", "por donde queda", "por dónde queda"])) {
+    const parts = [];
+    if (property?.location) parts.push(`zona: *${property.location}*`);
+    if (property?.exact_address) parts.push(`dirección: *${property.exact_address}*`);
+    if (property?.exact_location_reference) parts.push(`referencia: ${property.exact_location_reference}`);
+
+    return parts.length
+      ? `La ubicación registrada de *${name}* es ${parts.join(" · ")}.`
+      : buildUnknownPropertyAnswer(property, "la ubicación exacta");
+  }
+
+  if (hasAnyKeyword(t, ["titulo deslindado", "título deslindado"])) {
+    return `Título deslindado: *${yesNoUnknown(property?.title_deed)}*.`;
+  }
+
+  if (hasAnyKeyword(t, ["hipoteca", "carga legal", "gravamen"])) {
+    if (property?.legal_status) {
+      return `Sobre la parte legal de *${name}*: ${property.legal_status}.`;
+    }
+    return `Hipoteca o carga legal: *${yesNoUnknown(property?.has_mortgage)}*.`;
+  }
+
+  if (hasAnyKeyword(t, ["documentos", "al dia", "al día"])) {
+    return `Documentos al día: *${yesNoUnknown(property?.documents_up_to_date)}*.`;
+  }
+
+  if (hasAnyKeyword(t, ["financiamiento", "banco", "financiar"])) {
+    const answer = `Financiamiento bancario: *${yesNoUnknown(property?.bank_financing)}*.`;
+    const note = property?.bank_financing_note ? ` ${property.bank_financing_note}` : "";
+    return `${answer}${note}`.trim();
+  }
+
+  if (hasAnyKeyword(t, ["inicial", "separacion", "separación"])) {
+    return property?.down_payment
+      ? `El inicial / separación registrado para *${name}* es: *${property.down_payment}*.`
+      : buildUnknownPropertyAnswer(property, "el inicial");
+  }
+
+  if (hasAnyKeyword(t, ["facilidades de pago", "pago con el propietario", "facilidad de pago"])) {
+    return property?.payment_facilities
+      ? `Facilidades de pago: ${property.payment_facilities}`
+      : buildUnknownPropertyAnswer(property, "las facilidades de pago");
+  }
+
+  if (hasAnyKeyword(t, ["cuota", "mensual", "mensualidad"])) {
+    return property?.estimated_monthly_fee
+      ? `La cuota aproximada registrada es: *${property.estimated_monthly_fee}*.`
+      : buildUnknownPropertyAnswer(property, "la cuota aproximada mensual");
+  }
+
+  if (hasAnyKeyword(t, ["traspaso", "costo de traspaso"])) {
+    return property?.transfer_cost
+      ? `El costo de traspaso registrado es: *${property.transfer_cost}*.`
+      : buildUnknownPropertyAnswer(property, "el costo de traspaso");
+  }
+
+  if (hasAnyKeyword(t, ["sector", "zona segura", "segura", "seguridad"])) {
+    return property?.safety
+      ? `Sobre la zona de *${name}*: ${property.safety}`
+      : buildUnknownPropertyAnswer(property, "el nivel de seguridad de la zona");
+  }
+
+  if (hasAnyKeyword(t, ["colegios", "hospitales", "supermercados", "cerca", "lugares cercanos"])) {
+    return property?.nearby_places?.length
+      ? `Cerca de *${name}* se tiene registrado: ${property.nearby_places.join(", ")}.`
+      : buildUnknownPropertyAnswer(property, "los lugares cercanos");
+  }
+
+  if (hasAnyKeyword(t, ["acceso", "transporte"])) {
+    return property?.transport_access
+      ? `Sobre el acceso y transporte: ${property.transport_access}`
+      : buildUnknownPropertyAnswer(property, "el acceso y transporte");
+  }
+
+  if (hasAnyKeyword(t, ["pasos para comprar", "proceso de compra", "como comprar", "cómo comprar"])) {
+    return property?.purchase_steps
+      ? `Pasos del proceso de compra: ${property.purchase_steps}`
+      : buildUnknownPropertyAnswer(property, "los pasos del proceso de compra");
+  }
+
+  if (hasAnyKeyword(t, ["cuanto tiempo tarda", "cuánto tiempo tarda", "tiempo del proceso", "duracion del proceso", "duración del proceso"])) {
+    return property?.purchase_timeline
+      ? `Tiempo estimado del proceso: ${property.purchase_timeline}`
+      : buildUnknownPropertyAnswer(property, "el tiempo del proceso de compra");
+  }
+
+  if (hasAnyKeyword(t, ["amenidades", "que incluye", "qué incluye", "que tiene", "qué tiene"])) {
+    const features = propertyFeatureListText(property);
+    if (features.length) {
+      return `Esta propiedad incluye: ${features.join(", ")}.`;
+    }
+    if (property?.short_description) {
+      return `Sobre *${name}*: ${property.short_description}`;
+    }
+    return buildUnknownPropertyAnswer(property, "las amenidades");
+  }
+
+  return property?.short_description
+    ? `Sobre *${name}*: ${property.short_description}`
+    : propertySummary(property);
+}
+
+async function answerPropertyQuestionWithAI(property, userText) {
+  const heuristic = answerPropertyQuestionHeuristic(property, userText);
+  if (!OPENAI_API_KEY || !REAL_ESTATE_AI_ENABLED) return heuristic;
+
+  try {
+    const resp = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_MODEL,
+        temperature: 0.1,
+        messages: [
+          {
+            role: "system",
+            content:
+              `Eres un asistente inmobiliario. Responde SOLO con base en la ficha de la propiedad suministrada. ` +
+              `No inventes datos. Si algo no está confirmado, dilo claramente y ofrece pasar con un asesor. ` +
+              `Responde en español, breve, natural y útil.`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              pregunta: userText,
+              propiedad: propertyFaqSnapshot(property),
+            }),
+          },
+        ],
+      },
+      {
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      }
+    );
+
+    const text = resp.data?.choices?.[0]?.message?.content?.trim();
+    return text || heuristic;
+  } catch (e) {
+    console.error("answerPropertyQuestionWithAI error:", e?.response?.data || e?.message || e);
+    return heuristic;
+  }
+}
+
+function buildSelectedPropertyNextStep(session) {
+  if (!session?.selectedProperty) return `\n\nTambién puedes escribir *inicio* para volver al catálogo.`;
+
+  if (session.state === "await_day") {
+    return `\n\nSi quieres agendar la visita de *${propertyPublicLabel(
+      session.selectedProperty
+    )}*, dime el día.\nEj: "mañana", "viernes", "14 de junio".\n\nTambién puedes escribir *inicio* para volver al catálogo.`;
+  }
+
+  if (session.state === "await_slot_choice" && session.lastSlots?.length) {
+    return `\n\nCuando quieras continuar, responde con el *número* del horario o escribe otra fecha.\nTambién puedes escribir *inicio* para volver al catálogo.`;
+  }
+
+  if (session.state === "await_name" && session.selectedSlot) {
+    return `\n\nSi quieres continuar con la reserva, envíame tu *nombre completo*.\nTambién puedes escribir *inicio* para volver al catálogo.`;
+  }
+
+  if (session.state === "await_phone" && session.selectedSlot && session.pendingName) {
+    return `\n\nSi quieres continuar con la reserva, envíame tu *número de teléfono*.\nTambién puedes escribir *inicio* para volver al catálogo.`;
+  }
+
+  return `\n\nTambién puedes escribir *inicio* para volver al catálogo.`;
+}
+
+async function extractLeadCriteriaWithAI(userText, session) {
+  const fallback = extractLeadCriteriaHeuristic(userText, session);
+  if (!REAL_ESTATE_AI_ENABLED || !OPENAI_API_KEY || !shouldUseAdvisorSearch(userText)) return fallback;
+
+  try {
+    const messages = [
+      {
+        role: "system",
+        content:
+          `Extrae intención inmobiliaria del mensaje del usuario y responde SOLO JSON válido. ` +
+          `Usa estas categorías exactas: alquiler, venta, solares, proyectos, locales_comerciales, casas, apartamentos. ` +
+          `Campos: intent, operation, category, zone_interest, budget, budget_max, bedrooms, bathrooms, purpose, timeline, wants_visit, summary. ` +
+          `No inventes valores. Si no está claro usa cadena vacía o null.\n\n` +
+          `Catálogo resumido:\n${summarizeCatalogForPrompt(30)}`,
+      },
+      { role: "user", content: String(userText || "") },
+    ];
+
+    const resp = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_MODEL,
+        messages,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+      },
+      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
+    );
+
+    const raw = resp.data.choices?.[0]?.message?.content?.trim() || "{}";
+    const parsed = safeJson(raw, null);
+    if (!parsed || typeof parsed !== "object") return fallback;
+
+    return mergeLeadProfile(fallback || {}, {
+      intent: parsed.intent || fallback?.intent || "other",
+      operation: parsed.operation || fallback?.operation || "",
+      category: parsed.category || fallback?.category || "",
+      zone_interest: parsed.zone_interest || fallback?.zone_interest || "",
+      budget: parsed.budget || fallback?.budget || "",
+      budget_max: Number.isFinite(Number(parsed.budget_max)) ? Number(parsed.budget_max) : fallback?.budget_max ?? null,
+      bedrooms: Number.isFinite(Number(parsed.bedrooms)) ? Number(parsed.bedrooms) : fallback?.bedrooms ?? null,
+      bathrooms: Number.isFinite(Number(parsed.bathrooms)) ? Number(parsed.bathrooms) : fallback?.bathrooms ?? null,
+      purpose: parsed.purpose || fallback?.purpose || "",
+      timeline: parsed.timeline || fallback?.timeline || "",
+      wants_visit: typeof parsed.wants_visit === "boolean" ? parsed.wants_visit : fallback?.wants_visit || false,
+    });
+  } catch (e) {
+    console.error("extractLeadCriteriaWithAI error:", e?.response?.data || e?.message || e);
+    return fallback;
+  }
+}
+
 function extractLeadCriteriaHeuristic(userText, session) {
   const t = normalizeText(userText || "");
   if (!t) return null;
@@ -1014,200 +1489,6 @@ function extractLeadCriteriaHeuristic(userText, session) {
   return criteria;
 }
 
-async function extractLeadCriteriaWithAI(userText, session) {
-  const fallback = extractLeadCriteriaHeuristic(userText, session);
-  if (!REAL_ESTATE_AI_ENABLED || !OPENAI_API_KEY || !shouldUseAdvisorSearch(userText)) return fallback;
-
-  try {
-    const messages = [
-      {
-        role: "system",
-        content:
-          `Extrae intención inmobiliaria del mensaje del usuario y responde SOLO JSON válido. ` +
-          `Usa estas categorías exactas: alquiler, venta, solares, proyectos, locales_comerciales, casas, apartamentos. ` +
-          `Campos: intent, operation, category, zone_interest, budget, budget_max, bedrooms, bathrooms, purpose, timeline, wants_visit, summary. ` +
-          `No inventes valores. Si no está claro usa cadena vacía o null.\n\n` +
-          `Catálogo resumido:\n${summarizeCatalogForPrompt(30)}`,
-      },
-      { role: "user", content: String(userText || "") },
-    ];
-
-    const resp = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: OPENAI_MODEL,
-        messages,
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-      },
-      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
-    );
-
-    const raw = resp.data.choices?.[0]?.message?.content?.trim() || "{}";
-    const parsed = safeJson(raw, null);
-    if (!parsed || typeof parsed !== "object") return fallback;
-
-    return mergeLeadProfile(fallback || {}, {
-      intent: parsed.intent || fallback?.intent || "other",
-      operation: parsed.operation || fallback?.operation || "",
-      category: parsed.category || fallback?.category || "",
-      zone_interest: parsed.zone_interest || fallback?.zone_interest || "",
-      budget: parsed.budget || fallback?.budget || "",
-      budget_max: Number.isFinite(Number(parsed.budget_max)) ? Number(parsed.budget_max) : fallback?.budget_max ?? null,
-      bedrooms: Number.isFinite(Number(parsed.bedrooms)) ? Number(parsed.bedrooms) : fallback?.bedrooms ?? null,
-      bathrooms: Number.isFinite(Number(parsed.bathrooms)) ? Number(parsed.bathrooms) : fallback?.bathrooms ?? null,
-      purpose: parsed.purpose || fallback?.purpose || "",
-      timeline: parsed.timeline || fallback?.timeline || "",
-      wants_visit: typeof parsed.wants_visit === "boolean" ? parsed.wants_visit : fallback?.wants_visit || false,
-    });
-  } catch (e) {
-    console.error("extractLeadCriteriaWithAI error:", e?.response?.data || e?.message || e);
-    return fallback;
-  }
-}
-
-function activateColdLead(session, patch = {}) {
-  const nowIso = new Date().toISOString();
-  const prev = session?.coldLead || defaultColdLead();
-  session.coldLead = {
-    ...defaultColdLead(),
-    ...prev,
-    ...patch,
-    active: true,
-    stopped: false,
-    started_at: prev.started_at || nowIso,
-    last_inbound_at: nowIso,
-  };
-}
-
-function stopColdLead(session, reason = "") {
-  const prev = session?.coldLead || defaultColdLead();
-  session.coldLead = {
-    ...defaultColdLead(),
-    ...prev,
-    active: false,
-    stopped: true,
-    status: reason || prev.status || "stopped",
-  };
-}
-
-function touchColdLeadInbound(session) {
-  const prev = session?.coldLead || defaultColdLead();
-  session.coldLead = {
-    ...defaultColdLead(),
-    ...prev,
-    last_inbound_at: new Date().toISOString(),
-  };
-}
-
-function looksLikeStopFollowUp(textNorm) {
-  const t = normalizeText(textNorm || "");
-  return [
-    "stop",
-    "detener",
-    "parar",
-    "no me escribas",
-    "no escribir",
-    "no me interesa",
-    "ya no me interesa",
-    "deja de escribir",
-  ].some((k) => t.includes(normalizeText(k)));
-}
-
-function canSendColdLeadFreeform(lastInboundAt) {
-  if (!lastInboundAt) return false;
-  const diffMs = Date.now() - new Date(lastInboundAt).getTime();
-  return diffMs <= 23 * 60 * 60 * 1000;
-}
-
-function buildColdLeadFollowupMessage(session, step) {
-  const cold = session?.coldLead || defaultColdLead();
-  const prop = cold.selected_property_title || session?.selectedProperty?.title || "";
-  const category = cold.category ? categoryTitle(cold.category) : "";
-
-  if (step === 1) {
-    if (prop) {
-      return `Hola 👋 Vi que estuviste viendo *${prop}*. Si quieres, te ayudo a retomar el proceso y agendar una visita.`;
-    }
-    if (category) {
-      return `Hola 👋 Vi que estuviste explorando *${category}*. Si quieres, te ayudo a retomar el proceso y ver opciones disponibles.`;
-    }
-    return `Hola 👋 Vi que estuviste viendo propiedades en *${BUSINESS_NAME}*. Si quieres, te ayudo a retomar el proceso y agendar una visita.`;
-  }
-
-  if (step === 2) {
-    return `Puedo ayudarte a encontrar una opción según el tipo de propiedad que buscas. Solo dime algo como *"Busco apartamento en alquiler"* y te recomiendo opciones.`;
-  }
-
-  if (prop) {
-    return `Todavía puedo ayudarte con *${prop}* ✅\nSi quieres, te muestro horarios disponibles para visitarla o te enseño otras opciones similares.`;
-  }
-
-  return `Todavía puedo ayudarte a encontrar una propiedad y agendar una visita ✅\nSi quieres, escribe *catálogo* y retomamos desde ahí.`;
-}
-
-async function coldLeadFollowupLoop() {
-  try {
-    if (!COLD_LEAD_ENABLED) return;
-
-    const ids = redis ? await redis.smembers(COLD_LEAD_SET_KEY) : Array.from(sessions.keys());
-    if (!ids?.length) return;
-
-    const now = Date.now();
-
-    for (const userId of ids) {
-      const session = await getSession(userId);
-      const cold = session?.coldLead || defaultColdLead();
-
-      if (!cold.active || cold.stopped) {
-        await saveSession(userId, session);
-        continue;
-      }
-
-      if (session?.lastVisit?.visit_id) {
-        stopColdLead(session, "visit_booked");
-        await saveSession(userId, session);
-        continue;
-      }
-
-      const lastInboundTs = cold.last_inbound_at ? new Date(cold.last_inbound_at).getTime() : 0;
-      if (!lastInboundTs || !canSendColdLeadFreeform(cold.last_inbound_at)) {
-        stopColdLead(session, "outside_freeform_window");
-        await saveSession(userId, session);
-        continue;
-      }
-
-      const inactiveMin = Math.floor((now - lastInboundTs) / 60000);
-      let nextStep = 0;
-
-      if (cold.followup_step < 1 && inactiveMin >= COLD_LEAD_STEP1_MIN) nextStep = 1;
-      else if (cold.followup_step < 2 && inactiveMin >= COLD_LEAD_STEP2_MIN) nextStep = 2;
-      else if (cold.followup_step < 3 && inactiveMin >= COLD_LEAD_STEP3_MIN) nextStep = 3;
-
-      if (!nextStep) {
-        await saveSession(userId, session);
-        continue;
-      }
-
-      const message = buildColdLeadFollowupMessage(session, nextStep);
-      if (!message) {
-        await saveSession(userId, session);
-        continue;
-      }
-
-      await sendWhatsAppText(userId, message, "BOT");
-      session.coldLead.followup_step = nextStep;
-      session.coldLead.last_followup_at = new Date().toISOString();
-      session.coldLead.last_outbound_at = new Date().toISOString();
-      if (nextStep >= 3) session.coldLead.active = false;
-
-      await saveSession(userId, session);
-    }
-  } catch (e) {
-    console.error("coldLeadFollowupLoop error:", e?.response?.data || e?.message || e);
-  }
-}
-
 async function maybeHandleAdvisorSearch({ session, userText }) {
   const criteria = await extractLeadCriteriaWithAI(userText, session);
   if (!criteria) return { handled: false };
@@ -1220,11 +1501,6 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
 
   const matches = findMatchingProperties(mergedProfile, AI_PROPERTY_RECOMMENDATION_LIMIT);
   if (!matches.length) {
-    activateColdLead(session, {
-      status: "interested",
-      category: mergedProfile.category || "",
-      ai_summary: "no_exact_match",
-    });
     return {
       handled: true,
       message:
@@ -1237,11 +1513,6 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
 
   session.lastRecommendations = matches;
   session.state = "await_property_choice";
-  activateColdLead(session, {
-    status: "interested",
-    category: mergedProfile.category || "",
-    ai_summary: matches.map((p) => p.title).join(", "),
-  });
 
   if (matches.length === 1 && criteria.wants_visit) {
     const property = matches[0];
@@ -1249,12 +1520,6 @@ async function maybeHandleAdvisorSearch({ session, userText }) {
     session.pendingCategory = property.category || null;
     session.lastRecommendations = [];
     session.state = "await_day";
-    activateColdLead(session, {
-      status: "selected_property",
-      selected_property_id: property.id || "",
-      selected_property_title: property.title || "",
-      category: property.category || "",
-    });
     return {
       handled: true,
       property,
@@ -1363,7 +1628,6 @@ function findPropertyByAny(value) {
   if (PROPERTY_BY_RETAILER_ID[raw]) return PROPERTY_BY_RETAILER_ID[raw];
   const codeNorm = normalizeText(raw);
   if (PROPERTY_BY_CODE[codeNorm]) return PROPERTY_BY_CODE[codeNorm];
-  if (PROPERTY_BY_TITLE[codeNorm]) return PROPERTY_BY_TITLE[codeNorm];
 
   return (
     PROPERTY_CATALOG.find((p) => normalizeText(p.title) === codeNorm) ||
@@ -2270,7 +2534,6 @@ async function finalizeVisitBookingAndNotify({ from, session }) {
     visit_id: visit.visit_id,
   });
 
-  stopColdLead(session, "visit_booked");
   session.lastVisit = visit;
   session.state = "post_booking";
   session.lastSlots = [];
@@ -2382,8 +2645,6 @@ app.post("/webhook", async (req, res) => {
       mediaUrl: inboundMetaWithMediaUrl?.mediaUrl || undefined,
     });
 
-    touchColdLeadInbound(session);
-
     const wantsCancel = looksLikeCancel(tNorm) || isChoice(tNorm, 3);
     const wantsReschedule = looksLikeReschedule(tNorm) || isChoice(tNorm, 2);
     const wantsConfirm = looksLikeConfirm(tNorm) || isChoice(tNorm, 1);
@@ -2399,17 +2660,10 @@ app.post("/webhook", async (req, res) => {
       "menú principal",
     ].some((k) => tNorm === k || tNorm.includes(k));
 
-    if (looksLikeStopFollowUp(tNorm)) {
-      stopColdLead(session, "user_opt_out");
-      await sendWhatsAppText(from, `Entendido ✅ No te enviaré más seguimientos automáticos. Si más adelante deseas retomar, solo escribe *catálogo*.`);
-      return res.sendStatus(200);
-    }
-
     if (wantsRestart) {
       session.lastVisit = null;
       clearVisitFlow(session);
       session.greeted = true;
-      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, welcomeText());
       return res.sendStatus(200);
     }
@@ -2436,15 +2690,27 @@ app.post("/webhook", async (req, res) => {
       tNorm.includes("cancel") ||
       looksLikeCatalogRequest(tNorm);
 
+    if (
+      !detectedPropertyEarly &&
+      !session.selectedProperty &&
+      looksLikePropertyQuestion(tNorm) &&
+      !shouldUseAdvisorSearch(userText)
+    ) {
+      await sendWhatsAppText(
+        from,
+        `Puedo responderte eso 😊\n\nPrimero necesito saber *de cuál propiedad hablas*.\nToca el botón del catálogo y elige una propiedad, o escríbeme el nombre.`
+      );
+      await sendPropertyCategoriesList(from);
+      return res.sendStatus(200);
+    }
+
     if (session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
-      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, quickHelpText());
       return res.sendStatus(200);
     }
 
     if (!session.greeted && session.state === "idle" && isGreeting(tNorm) && !hasEarlyIntent) {
       session.greeted = true;
-      activateColdLead(session, { status: "browsing" });
       await sendWelcomeAndCatalog(from, welcomeText());
       return res.sendStatus(200);
     }
@@ -2452,7 +2718,6 @@ app.post("/webhook", async (req, res) => {
     if (!session.greeted && session.state === "idle") session.greeted = true;
 
     if (looksLikeHuman(tNorm)) {
-      stopColdLead(session, "human_requested");
       await handoffToHumanTool({ summary: `Solicitud de asesor: ${userText}` });
       await sendWhatsAppText(from, `Perfecto ✅ Te paso con un asesor para continuar.`);
       return res.sendStatus(200);
@@ -2470,7 +2735,6 @@ app.post("/webhook", async (req, res) => {
 
       if (wantsCancel) {
         await cancelVisitTool({ visit_id: v.visit_id, reason: userText });
-        stopColdLead(session, "visit_cancelled");
         await sendWhatsAppText(from, `✅ Listo. Tu visita fue cancelada.\n\nSi deseas agendar otra, escribe *catálogo* y te muestro opciones.`);
         session.lastVisit = null;
         clearVisitFlow(session);
@@ -2500,13 +2764,6 @@ app.post("/webhook", async (req, res) => {
             category: v.category,
           };
 
-        activateColdLead(session, {
-          status: "selected_property",
-          selected_property_id: session.selectedProperty?.id || "",
-          selected_property_title: session.selectedProperty?.title || "",
-          category: session.selectedProperty?.category || "",
-        });
-
         session.state = "await_day";
         session.lastSlots = [];
         session.lastDisplaySlots = [];
@@ -2527,7 +2784,6 @@ app.post("/webhook", async (req, res) => {
       if (looksLikeNewVisit(tNorm)) {
         session.lastVisit = null;
         clearVisitFlow(session);
-        activateColdLead(session, { status: "browsing" });
         await sendWhatsAppText(from, `Claro ✅ Vamos a agendar una nueva visita.`);
         await sendPropertyCategoriesList(from);
         return res.sendStatus(200);
@@ -2548,10 +2804,25 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (
+      session.selectedProperty &&
+      !detectedPropertyEarly &&
+      looksLikePropertyQuestion(tNorm) &&
+      !detectedRangeEarly &&
+      !wantsCancel &&
+      !wantsReschedule &&
+      !wantsConfirm &&
+      !wantsRestart
+    ) {
+      const faqAnswer = await answerPropertyQuestionWithAI(session.selectedProperty, userText);
+      await sendWhatsAppText(from, `${faqAnswer}${buildSelectedPropertyNextStep(session)}`);
+      return res.sendStatus(200);
+    }
+
     if (session.state === "await_property_choice" && session.lastRecommendations?.length) {
       const pickedProperty = tryPickRecommendedPropertyFromUserText(session, userText);
       if (!pickedProperty) {
-        await sendWhatsAppText(from, `Responde con el *número* o con el *nombre* de la propiedad que te interesa y te ayudo con la visita.\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
+        await sendWhatsAppText(from, `Responde con el *número* o con el *nombre* de la propiedad que te interesa y te ayudo con la visita.`);
         return res.sendStatus(200);
       }
 
@@ -2559,12 +2830,6 @@ app.post("/webhook", async (req, res) => {
       session.pendingCategory = pickedProperty.category || null;
       session.lastRecommendations = [];
       session.state = "await_day";
-      activateColdLead(session, {
-        status: "selected_property",
-        selected_property_id: pickedProperty.id || "",
-        selected_property_title: pickedProperty.title || "",
-        category: pickedProperty.category || "",
-      });
       await reportLeadEventToCrm({
         to: from,
         action: "property_selected",
@@ -2582,7 +2847,6 @@ app.post("/webhook", async (req, res) => {
         session.lastVisit = null;
         clearVisitFlow(session);
         session.greeted = true;
-        activateColdLead(session, { status: "browsing" });
         await sendWelcomeAndCatalog(from, welcomeText());
         return res.sendStatus(200);
       }
@@ -2604,7 +2868,7 @@ app.post("/webhook", async (req, res) => {
       if (!picked) {
         await sendWhatsAppText(
           from,
-          `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).\n\nSi prefieres empezar de nuevo, escribe *inicio*.`
+          `No entendí el horario 🙏\nResponde con el *número* (1,2,3...) o la *hora* (ej: 10:00 am / 3:00 pm).`
         );
         return res.sendStatus(200);
       }
@@ -2634,7 +2898,6 @@ app.post("/webhook", async (req, res) => {
           budget: session.reschedule.budget,
         });
 
-        stopColdLead(session, "visit_rescheduled");
         session.lastVisit = {
           visit_id: session.reschedule.visit_id,
           start: picked.start,
@@ -2696,19 +2959,19 @@ app.post("/webhook", async (req, res) => {
 
     if (session.state === "await_name" && session.selectedSlot) {
       if (tNorm.length < 3 || ["si", "sí", "ok", "listo"].includes(tNorm)) {
-        await sendWhatsAppText(from, `Por favor, envíame tu *nombre completo* 🙂\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
+        await sendWhatsAppText(from, `Por favor, envíame tu *nombre completo* 🙂`);
         return res.sendStatus(200);
       }
       session.pendingName = userText;
       session.state = "await_phone";
-      await sendWhatsAppText(from, `Gracias. Ahora envíame tu *número de teléfono* (ej: 829XXXXXXX).\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
+      await sendWhatsAppText(from, `Gracias. Ahora envíame tu *número de teléfono* (ej: 829XXXXXXX).`);
       return res.sendStatus(200);
     }
 
     if (session.state === "await_phone" && session.selectedSlot && session.pendingName) {
       const phoneDigits = userText.replace(/[^\d]/g, "");
       if (phoneDigits.length < 8) {
-        await sendWhatsAppText(from, `Ese número parece incompleto 🙏\nEnvíame el teléfono así: 829XXXXXXX\n\nSi prefieres empezar de nuevo, escribe *inicio*.`);
+        await sendWhatsAppText(from, `Ese número parece incompleto 🙏\nEnvíame el teléfono así: 829XXXXXXX`);
         return res.sendStatus(200);
       }
       session.pendingPhone = phoneDigits;
@@ -2727,17 +2990,12 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (looksLikeCatalogRequest(tNorm)) {
-      activateColdLead(session, { status: "browsing" });
       await sendPropertyCategoriesList(from);
       return res.sendStatus(200);
     }
 
     if (detectedCategoryEarly && !detectedPropertyEarly) {
       session.pendingCategory = detectedCategoryEarly;
-      activateColdLead(session, {
-        status: "interested",
-        category: detectedCategoryEarly,
-      });
       await sendCatalogForCategory(from, detectedCategoryEarly, session);
       return res.sendStatus(200);
     }
@@ -2746,34 +3004,45 @@ app.post("/webhook", async (req, res) => {
       session.selectedProperty = detectedPropertyEarly;
       session.pendingCategory = detectedPropertyEarly.category || null;
       session.lastRecommendations = [];
-      activateColdLead(session, {
-        status: "selected_property",
-        selected_property_id: detectedPropertyEarly.id || "",
-        selected_property_title: detectedPropertyEarly.title || "",
-        category: detectedPropertyEarly.category || "",
-      });
+
       await reportLeadEventToCrm({
         to: from,
         action: "property_selected",
         property: detectedPropertyEarly,
       });
+
       const range = parseDateRangeFromText(userText);
 
       if (!range) {
         session.state = "await_day";
+
+        if (looksLikePropertyQuestion(tNorm)) {
+          const faqAnswer = await answerPropertyQuestionWithAI(detectedPropertyEarly, userText);
+          await sendWhatsAppText(
+            from,
+            `${propertySummary(detectedPropertyEarly)}\n\n${faqAnswer}\n\nSi quieres verla en persona, dime qué día te gustaría visitarla.\nEj: "mañana", "viernes", "14 de junio".\n\nTambién puedes escribir *inicio* para volver al catálogo.`
+          );
+          return res.sendStatus(200);
+        }
+
         await sendWhatsAppText(
           from,
-          `${propertySummary(detectedPropertyEarly)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".`
+          `${propertySummary(detectedPropertyEarly)}\n\nExcelente elección ✅\n¿Cuándo te gustaría visitar esta propiedad?\nEj: "mañana", "viernes", "14 de junio".\n\nTambién puedes escribir *inicio* para volver al catálogo.`
         );
         return res.sendStatus(200);
       }
 
-      const slots = await getAvailableVisitSlotsTool({ property: detectedPropertyEarly, from: range.from, to: range.to });
+      const slots = await getAvailableVisitSlotsTool({
+        property: detectedPropertyEarly,
+        from: range.from,
+        to: range.to,
+      });
+
       if (!slots.length) {
         session.state = "await_day";
         await sendWhatsAppText(
           from,
-          `Reconocí la propiedad *${propertyPublicLabel(detectedPropertyEarly)}* ✅\nPero no veo espacios disponibles para ese rango.\nDime otro día.`
+          `Reconocí la propiedad *${propertyPublicLabel(detectedPropertyEarly)}* ✅\nPero no veo espacios disponibles para ese rango.\nDime otro día.\n\nTambién puedes escribir *inicio* para volver al catálogo.`
         );
         return res.sendStatus(200);
       }
@@ -2781,18 +3050,38 @@ app.post("/webhook", async (req, res) => {
       session.pendingRange = range;
       session.lastSlots = slots;
       session.state = "await_slot_choice";
-      await sendWhatsAppText(from, `${propertySummary(detectedPropertyEarly)}\n\n${formatSlotsList(detectedPropertyEarly, slots, session)}`);
+
+      await sendWhatsAppText(
+        from,
+        `${propertySummary(detectedPropertyEarly)}\n\n${formatSlotsList(detectedPropertyEarly, slots, session)}`
+      );
       return res.sendStatus(200);
     }
 
     if (!detectedPropertyEarly && session.selectedProperty) {
       const range = parseDateRangeFromText(userText);
+
+      if (!range && session.state === "await_day" && looksLikePropertyQuestion(tNorm)) {
+        const faqAnswer = await answerPropertyQuestionWithAI(session.selectedProperty, userText);
+        await sendWhatsAppText(
+          from,
+          `${faqAnswer}\n\nSi quieres agendar la visita de *${propertyPublicLabel(
+            session.selectedProperty
+          )}*, dime el día.\nEj: "mañana", "viernes", "14 de junio".\n\nTambién puedes escribir *inicio* para volver al catálogo.`
+        );
+        return res.sendStatus(200);
+      }
+
       if (range) {
-        const slots = await getAvailableVisitSlotsTool({ property: session.selectedProperty, from: range.from, to: range.to });
+        const slots = await getAvailableVisitSlotsTool({
+          property: session.selectedProperty,
+          from: range.from,
+          to: range.to,
+        });
         if (!slots.length) {
           await sendWhatsAppText(
             from,
-            `No veo espacios disponibles para *${propertyPublicLabel(session.selectedProperty)}* en ese rango 🙏\nDime otro día.`
+            `No veo espacios disponibles para *${propertyPublicLabel(session.selectedProperty)}* en ese rango 🙏\nDime otro día.\n\nTambién puedes escribir *inicio* para volver al catálogo.`
           );
           return res.sendStatus(200);
         }
@@ -2806,10 +3095,27 @@ app.post("/webhook", async (req, res) => {
       if (session.state === "await_day") {
         await sendWhatsAppText(
           from,
-          `Para elegir el día, puedes escribir: "mañana", "viernes", "próximo martes", "14 de junio" o "en junio".\n\nSi prefieres empezar de nuevo, escribe *inicio*.`
+          `Para elegir el día, puedes escribir: "mañana", "viernes", "próximo martes", "14 de junio" o "en junio".\n\nTambién puedes hacer una pregunta sobre esta propiedad o escribir *inicio* para volver al catálogo.`
         );
         return res.sendStatus(200);
       }
+    }
+
+    if (looksLikeHuman(tNorm)) {
+      await reportLeadEventToCrm({
+        to: from,
+        action: "human_requested",
+        property: session.selectedProperty,
+        lead_name: session.pendingName || session.lastVisit?.lead_name || "",
+        phone: session.pendingPhone || session.lastVisit?.phone || "",
+        zone_interest: session.pendingZone || session.aiProfile?.zone_interest || session.lastVisit?.zone_interest || "",
+        budget: session.pendingBudget || session.aiProfile?.budget || session.lastVisit?.budget || "",
+      });
+      await sendWhatsAppText(
+        from,
+        `Perfecto ✅ Voy a dejar tu caso listo para que un asesor te continúe ayudando. Mientras tanto, también puedo recomendarte propiedades o agendar una visita si ya viste una que te interese en el catálogo.`
+      );
+      return res.sendStatus(200);
     }
 
     const advisor = await maybeHandleAdvisorSearch({ session, userText });
@@ -2849,7 +3155,6 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", (_req, res) => res.send("OK"));
 app.get("/health", (_req, res) => res.status(200).send("ok"));
-app.get("/ping", (_req, res) => res.status(200).send("pong"));
 
 async function reminderLoop() {
   try {
@@ -2913,7 +3218,6 @@ async function reminderLoop() {
 app.get("/tick", async (_req, res) => {
   try {
     await reminderLoop();
-    await coldLeadFollowupLoop();
   } catch {}
   return res.status(200).send("tick ok");
 });
