@@ -124,6 +124,14 @@ function hasAnyKeyword(textNorm, keywords = []) {
   return keywords.some((k) => t.includes(normalizeText(k)));
 }
 
+function digitsOnly(value) {
+  return String(value || "").replace(/[^\d]/g, "");
+}
+
+function bufferToDataUrl(buffer, mimeType = "application/octet-stream") {
+  return `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
+}
+
 function defaultWorkHours() {
   return {
     mon: { start: "08:00", end: "17:30" },
@@ -271,8 +279,14 @@ const META_APP_SECRET = process.env.META_APP_SECRET;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_AUDIO_MODEL = process.env.OPENAI_AUDIO_MODEL || "whisper-1";
+
 const REAL_ESTATE_AI_ENABLED = (process.env.REAL_ESTATE_AI_ENABLED || "1") === "1";
+const MEDIA_AI_ENABLED = (process.env.MEDIA_AI_ENABLED || "1") === "1";
 const AI_PROPERTY_RECOMMENDATION_LIMIT = parseInt(process.env.AI_PROPERTY_RECOMMENDATION_LIMIT || "3", 10);
+const MEDIA_AUDIO_MAX_BYTES = parseInt(process.env.MEDIA_AUDIO_MAX_BYTES || String(12 * 1024 * 1024), 10);
+const MEDIA_IMAGE_MAX_BYTES = parseInt(process.env.MEDIA_IMAGE_MAX_BYTES || String(8 * 1024 * 1024), 10);
 
 const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 const BUSINESS_NAME = process.env.BUSINESS_NAME || process.env.CLINIC_NAME || "LV Inmobiliaria";
@@ -519,10 +533,11 @@ function defaultSession() {
     lastVisit: null,
     greeted: false,
     lastMsgId: null,
-
-    // ✅ NEW: takeover humano desde CRM
     humanTakeover: false,
-
+    mediaContext: {
+      lastImageText: "",
+      lastAudioText: "",
+    },
     reschedule: {
       active: false,
       visit_id: "",
@@ -563,12 +578,12 @@ function sanitizeSession(session) {
   if (!session.reschedule || typeof session.reschedule !== "object") {
     session.reschedule = defaultSession().reschedule;
   }
+  if (!session.mediaContext || typeof session.mediaContext !== "object") {
+    session.mediaContext = defaultSession().mediaContext;
+  }
   if (typeof session.state !== "string") session.state = "idle";
   if (typeof session.greeted !== "boolean") session.greeted = false;
-
-  // ✅ NEW: takeover humano
   if (typeof session.humanTakeover !== "boolean") session.humanTakeover = false;
-
   return session;
 }
 
@@ -733,6 +748,108 @@ async function downloadMetaMedia(mediaId) {
     mimeType,
     meta: info,
   };
+}
+
+async function transcribeAudioBuffer(buffer, mimeType = "audio/ogg") {
+  if (!OPENAI_API_KEY || !MEDIA_AI_ENABLED || !buffer?.length) return "";
+  if (buffer.length > MEDIA_AUDIO_MAX_BYTES) return "";
+
+  try {
+    const form = new FormData();
+    const ext = extFromMimeType(mimeType) || ".ogg";
+    form.append("model", OPENAI_AUDIO_MODEL);
+    form.append("language", "es");
+    form.append("file", new Blob([buffer], { type: mimeType || "audio/ogg" }), `nota_voz${ext}`);
+
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: form,
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(errText || `OpenAI audio transcription failed (${resp.status})`);
+    }
+
+    const data = await resp.json();
+    return cleanText(data?.text || "");
+  } catch (e) {
+    console.error("transcribeAudioBuffer error:", e?.message || e);
+    return "";
+  }
+}
+
+async function understandPropertyImageBuffer(buffer, mimeType = "image/jpeg", caption = "") {
+  const fallback = {
+    is_property_related: false,
+    normalized_user_text: cleanText(caption),
+    extracted_text: "",
+    wants_visit: false,
+  };
+
+  if (!OPENAI_API_KEY || !MEDIA_AI_ENABLED || !buffer?.length) return fallback;
+  if (buffer.length > MEDIA_IMAGE_MAX_BYTES) return fallback;
+
+  try {
+    const dataUrl = bufferToDataUrl(buffer, mimeType || "image/jpeg");
+
+    const resp = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_VISION_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              `Analiza una imagen recibida por WhatsApp. ` +
+              `Si es un flyer, captura o anuncio de una propiedad inmobiliaria, extrae la información visible y conviértela en un mensaje corto en español que un bot inmobiliario pueda entender para identificar la propiedad y continuar el flujo. ` +
+              `No inventes datos. Si hay caption del usuario, intégralo. ` +
+              `Si no hay una pregunta explícita pero sí una propiedad identificable, redacta normalized_user_text como interés natural del usuario, por ejemplo: "Me interesa la propiedad en X, precio Y, quiero más información". ` +
+              `Devuelve SOLO JSON con estas claves exactas: is_property_related, normalized_user_text, extracted_text, wants_visit.`,
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  `Caption del usuario: ${cleanText(caption) || "(sin caption)"}\n` +
+                  `Extrae el texto visible y genera normalized_user_text en español.`,
+              },
+              {
+                type: "image_url",
+                image_url: { url: dataUrl },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        timeout: 90000,
+      }
+    );
+
+    const raw = resp.data?.choices?.[0]?.message?.content?.trim() || "{}";
+    const parsed = safeJson(raw, {});
+    const normalized_user_text = cleanText(parsed?.normalized_user_text || "");
+    const extracted_text = cleanText(parsed?.extracted_text || "");
+
+    return {
+      is_property_related: parsed?.is_property_related === true,
+      normalized_user_text: normalized_user_text || cleanText(caption) || extracted_text,
+      extracted_text,
+      wants_visit: parsed?.wants_visit === true,
+    };
+  } catch (e) {
+    console.error("understandPropertyImageBuffer error:", e?.response?.data || e?.message || e);
+    return fallback;
+  }
 }
 
 function extractInboundMeta(msg) {
@@ -1002,6 +1119,105 @@ function propertyFindRelevantPiece(property, keywords = []) {
   return "";
 }
 
+function scorePropertyAgainstText(property, text) {
+  const raw = String(text || "").trim();
+  const t = normalizeText(raw);
+  if (!t) return 0;
+
+  let score = 0;
+
+  const importantFields = [
+    { value: property?.code, points: 14, min: 2 },
+    { value: property?.title, points: 11, min: 4 },
+    { value: property?.exact_address, points: 10, min: 5 },
+    { value: property?.location, points: 8, min: 4 },
+    { value: property?.exact_location_reference, points: 5, min: 4 },
+  ];
+
+  for (const field of importantFields) {
+    const n = normalizeText(field.value);
+    if (n && n.length >= field.min && t.includes(n)) {
+      score += field.points;
+    }
+  }
+
+  const titleTokens = normalizeText(property?.title || "")
+    .split(" ")
+    .filter((x) => x.length >= 4);
+  let titleTokenHits = 0;
+  for (const tk of titleTokens) {
+    if (t.includes(tk)) titleTokenHits++;
+  }
+  score += Math.min(4, titleTokenHits);
+
+  const textDigits = digitsOnly(raw);
+  const priceDigits = digitsOnly(property?.price);
+  if (priceDigits && priceDigits.length >= 5 && textDigits.includes(priceDigits)) {
+    score += 4;
+  }
+
+  const m2Variants = [property?.area_m2, property?.lot_m2, property?.construction_m2]
+    .map((v) => digitsOnly(v))
+    .filter(Boolean);
+
+  for (const m of new Set(m2Variants)) {
+    if (m.length >= 2 && textDigits.includes(m)) {
+      score += 2;
+      break;
+    }
+  }
+
+  const beds = Number(property?.bedrooms);
+  if (Number.isFinite(beds) && beds > 0) {
+    const bedRx = new RegExp(`\\b${beds}\\b\\s*(hab|habitacion|habitaciones|cuartos?)`);
+    if (bedRx.test(t)) score += 2;
+  }
+
+  const baths = Number(property?.bathrooms);
+  if (Number.isFinite(baths) && baths > 0) {
+    const bathRx = new RegExp(`\\b${baths}\\b\\s*(bano|banos|baño|baños)`);
+    if (bathRx.test(t)) score += 2;
+  }
+
+  const parking = Number(property?.parking);
+  if (Number.isFinite(parking) && parking > 0) {
+    const parkRx = new RegExp(`\\b${parking}\\b\\s*(parqueo|parqueos|parking|marquesina)`);
+    if (parkRx.test(t)) score += 1;
+  }
+
+  const features = propertyFeatureListText(property, 12).map((v) => normalizeText(v)).filter((v) => v.length >= 4);
+  let featureHits = 0;
+  for (const ft of features) {
+    if (t.includes(ft)) featureHits++;
+    if (featureHits >= 3) break;
+  }
+  score += Math.min(3, featureHits);
+
+  return score;
+}
+
+function findPropertyFromRichText(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const ranked = PROPERTY_CATALOG.map((p) => ({
+    property: p,
+    score: scorePropertyAgainstText(p, raw),
+  }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!ranked.length) return null;
+
+  const best = ranked[0];
+  const second = ranked[1];
+
+  if (best.score >= 7) return best.property;
+  if (best.score >= 5 && (!second || best.score >= second.score + 2)) return best.property;
+
+  return null;
+}
+
 function looksLikeGeneralQuestion(text) {
   const raw = String(text || "").trim();
   const t = normalizeText(raw);
@@ -1029,6 +1245,11 @@ function looksLikeGeneralQuestion(text) {
     "son ",
     "tendra ",
     "tendrá ",
+    "quiero informacion",
+    "quiero información",
+    "mas informacion",
+    "más información",
+    "detalles ",
   ].some((k) => t.startsWith(normalizeText(k)));
 }
 
@@ -1226,6 +1447,13 @@ function looksLikePropertyQuestion(textNorm) {
     "cuánto cuesta",
     "valor",
     "costo",
+    "informacion",
+    "información",
+    "mas informacion",
+    "más información",
+    "detalles",
+    "más detalles",
+    "mas detalles",
 
     "metros",
     "metro cuadrado",
@@ -1469,6 +1697,11 @@ function answerPropertyQuestionHeuristic(property, userText) {
       : buildUnknownPropertyAnswer(property, "el precio");
   }
 
+  if (hasAnyKeyword(t, ["informacion", "información", "mas informacion", "más información", "detalles", "más detalles", "mas detalles"])) {
+    if (property?.short_description) return `Claro ✅ Sobre *${name}*: ${property.short_description}`;
+    return propertySummary(property);
+  }
+
   if (
     hasAnyKeyword(t, [
       "metros",
@@ -1551,11 +1784,7 @@ function answerPropertyQuestionHeuristic(property, userText) {
     if (water === true) return `Sí, *${name}* tiene servicio de agua.`;
     if (water === false) return `No, *${name}* no tiene servicio de agua registrado.`;
 
-    if (
-      searchText.includes("agua") ||
-      searchText.includes("cisterna") ||
-      searchText.includes("tinaco")
-    ) {
+    if (searchText.includes("agua") || searchText.includes("cisterna") || searchText.includes("tinaco")) {
       const piece = propertyFindRelevantPiece(property, ["agua", "cisterna", "tinaco"]);
       return piece
         ? `Sobre el agua de *${name}*: ${piece}`
@@ -2121,13 +2350,16 @@ function findPropertyByAny(value) {
   const codeNorm = normalizeText(raw);
   if (PROPERTY_BY_CODE[codeNorm]) return PROPERTY_BY_CODE[codeNorm];
 
-  return (
+  const direct =
     PROPERTY_CATALOG.find((p) => normalizeText(p.title) === codeNorm) ||
     PROPERTY_CATALOG.find((p) => codeNorm.includes(normalizeText(p.title))) ||
     PROPERTY_CATALOG.find((p) => codeNorm.includes(normalizeText(p.code))) ||
     PROPERTY_CATALOG.find((p) => p.location && codeNorm.includes(normalizeText(p.location))) ||
-    null
-  );
+    null;
+
+  if (direct) return direct;
+
+  return findPropertyFromRichText(raw);
 }
 
 function detectPropertyFromUserText(text) {
@@ -2915,6 +3147,9 @@ async function callOpenAIFallback({ session, userText, extraSystem = "" }) {
       ? `\nÚltimas recomendaciones:\n${session.lastRecommendations.map((p, i) => formatPropertyShortLine(p, i)).join("\n")}`
       : "";
     const leadProfileContext = session?.aiProfile ? `\nPerfil actual del lead: ${JSON.stringify(session.aiProfile)}` : "";
+    const mediaContext = session?.mediaContext
+      ? `\nÚltimo audio transcrito: ${session.mediaContext.lastAudioText || ""}\nÚltimo texto extraído de imagen: ${session.mediaContext.lastImageText || ""}`
+      : "";
 
     const system = {
       role: "system",
@@ -2924,7 +3159,7 @@ async function callOpenAIFallback({ session, userText, extraSystem = "" }) {
         `No inventes propiedades, precios, disponibilidad ni horarios. ` +
         `Si no tienes el dato, dilo y ofrece pasar con un asesor. ` +
         `Mantén respuestas cortas, claras y orientadas a cerrar visita o recomendar el siguiente paso. ` +
-        `${extraSystem}${selectedPropertyContext}${recommendationContext}${leadProfileContext}`,
+        `${extraSystem}${selectedPropertyContext}${recommendationContext}${leadProfileContext}${mediaContext}`,
     };
 
     const messages = [system, ...session.messages.slice(-8), { role: "user", content: userText }];
@@ -2951,23 +3186,73 @@ async function callOpenAIFallback({ session, userText, extraSystem = "" }) {
   return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo* o dime qué tipo de propiedad buscas.`;
 }
 
-function extractIncomingText(msg) {
+async function extractIncomingText(msg, session = null) {
   if (!msg) return "";
+
   if (msg?.text?.body) return msg.text.body;
-  if (msg?.type === "interactive" && msg?.interactive?.list_reply) return msg.interactive.list_reply.id || msg.interactive.list_reply.title || "";
-  if (msg?.type === "interactive" && msg?.interactive?.button_reply) return msg.interactive.button_reply.id || msg.interactive.button_reply.title || "";
-  if (msg?.type === "order" && msg?.order?.product_items?.length) return msg.order.product_items[0]?.product_retailer_id || "[CATALOG_ORDER]";
-  if (msg?.type === "audio" && msg?.audio?.id) return "[AUDIO]";
+
+  if (msg?.type === "interactive" && msg?.interactive?.list_reply) {
+    return msg.interactive.list_reply.id || msg.interactive.list_reply.title || "";
+  }
+
+  if (msg?.type === "interactive" && msg?.interactive?.button_reply) {
+    return msg.interactive.button_reply.id || msg.interactive.button_reply.title || "";
+  }
+
+  if (msg?.type === "order" && msg?.order?.product_items?.length) {
+    return msg.order.product_items[0]?.product_retailer_id || "[CATALOG_ORDER]";
+  }
+
+  if (msg?.type === "audio" && msg?.audio?.id) {
+    try {
+      const downloaded = await downloadMetaMedia(msg.audio.id);
+      const transcription = await transcribeAudioBuffer(
+        downloaded.buffer,
+        downloaded.mimeType || msg?.audio?.mime_type || "audio/ogg"
+      );
+      const finalText = cleanText(transcription || "");
+
+      if (session) session.mediaContext.lastAudioText = finalText;
+
+      return finalText || "[AUDIO]";
+    } catch (e) {
+      console.error("extractIncomingText audio error:", e?.message || e);
+      return "[AUDIO]";
+    }
+  }
+
   if (msg?.type === "location" && msg?.location) {
     const { latitude, longitude, name, address } = msg.location;
     return `📍 Ubicación: ${name || ""} ${address || ""} (${latitude}, ${longitude})`.trim();
   }
-  if (msg?.type === "image" && msg?.image?.id) return "[IMAGE]";
-  if (msg?.type === "video" && msg?.video?.id) return "[VIDEO]";
-  if (msg?.type === "document" && msg?.document?.id) return "[DOCUMENT]";
+
+  if (msg?.type === "image" && msg?.image?.id) {
+    const caption = cleanText(msg?.image?.caption || "");
+    try {
+      const downloaded = await downloadMetaMedia(msg.image.id);
+      const analysis = await understandPropertyImageBuffer(
+        downloaded.buffer,
+        downloaded.mimeType || msg?.image?.mime_type || "image/jpeg",
+        caption
+      );
+
+      const finalText = cleanText(analysis?.normalized_user_text || caption || "");
+
+      if (session) session.mediaContext.lastImageText = cleanText(analysis?.extracted_text || finalText || "");
+
+      return finalText || caption || "[IMAGE]";
+    } catch (e) {
+      console.error("extractIncomingText image error:", e?.message || e);
+      return caption || "[IMAGE]";
+    }
+  }
+
+  if (msg?.type === "video" && msg?.video?.id) return msg?.video?.caption || "[VIDEO]";
+  if (msg?.type === "document" && msg?.document?.id) return msg?.document?.filename || "[DOCUMENT]";
   if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
   if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
   if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
+
   return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
 }
 
@@ -3070,7 +3355,6 @@ app.post("/agent_message", async (req, res) => {
   }
 });
 
-// ✅ NEW: endpoint para takeover / return to bot desde CRM
 app.post("/conversation_mode", async (req, res) => {
   try {
     if (!BOTHUB_WEBHOOK_SECRET) {
@@ -3159,7 +3443,7 @@ app.post("/webhook", async (req, res) => {
     if (msgId && session.lastMsgId === msgId) return res.sendStatus(200);
     if (msgId) session.lastMsgId = msgId;
 
-    const userTextRaw = extractIncomingText(msg);
+    const userTextRaw = await extractIncomingText(msg, session);
     const userText = String(userTextRaw || "").trim();
     const tNorm = normalizeText(userText);
     if (!userText) return res.sendStatus(200);
@@ -3175,11 +3459,13 @@ app.post("/webhook", async (req, res) => {
       waMessageId: msg?.id,
       name: value?.contacts?.[0]?.profile?.name,
       kind: inboundMetaWithMediaUrl?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
-      meta: inboundMetaWithMediaUrl,
+      meta: {
+        ...inboundMetaWithMediaUrl,
+        aiResolvedText: userText,
+      },
       mediaUrl: inboundMetaWithMediaUrl?.mediaUrl || undefined,
     });
 
-    // ✅ NEW: si está en takeover humano, solo reporta al CRM y NO responde
     if (session.humanTakeover) {
       return res.sendStatus(200);
     }
