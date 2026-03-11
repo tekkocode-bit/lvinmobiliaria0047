@@ -400,6 +400,14 @@ function normalizeProperty(raw, index) {
   };
 }
 
+function normalizeOperationKey(operation) {
+  const t = normalizeText(operation || "");
+  if (!t) return "";
+  if (t.includes("alquiler") || t.includes("renta")) return "alquiler";
+  if (t.includes("venta") || t.includes("compr")) return "venta";
+  return "";
+}
+
 const PROPERTY_CATALOG = (safeJson(process.env.PROPERTY_CATALOG_JSON, []) || [])
   .map(normalizeProperty)
   .filter((p) => p.active);
@@ -688,7 +696,9 @@ async function getMetaMediaInfo(mediaId) {
     validateStatus: () => true,
   });
   if (res.status < 200 || res.status >= 300) {
-    throw new Error(res?.data?.error?.message || res?.data?.error?.error_user_msg || `Meta media lookup failed (${res.status})`);
+    throw new Error(
+      res?.data?.error?.message || res?.data?.error?.error_user_msg || `Meta media lookup failed (${res.status})`
+    );
   }
   return res.data || {};
 }
@@ -926,6 +936,94 @@ function propertyFeatureListText(property, limit = 12) {
   return [...new Set(out.filter(Boolean))].slice(0, limit);
 }
 
+function propertySearchText(property) {
+  return normalizeText(
+    [
+      property?.title || "",
+      property?.code || "",
+      property?.category || "",
+      property?.operation || "",
+      property?.location || "",
+      property?.exact_address || "",
+      property?.exact_location_reference || "",
+      property?.short_description || "",
+      property?.condition || "",
+      property?.legal_status || "",
+      property?.bank_financing_note || "",
+      property?.payment_facilities || "",
+      property?.estimated_monthly_fee || "",
+      property?.purchase_steps || "",
+      property?.purchase_timeline || "",
+      property?.transport_access || "",
+      property?.safety || "",
+      property?.floor_level || "",
+      ...(Array.isArray(property?.features) ? property.features : []),
+      ...(Array.isArray(property?.nearby_places) ? property.nearby_places : []),
+    ]
+      .filter(Boolean)
+      .join(" | ")
+  );
+}
+
+function propertyFindRelevantPiece(property, keywords = []) {
+  const norms = (keywords || []).map((k) => normalizeText(k)).filter(Boolean);
+  const pieces = [
+    ...(Array.isArray(property?.features) ? property.features : []),
+    ...String(property?.short_description || "")
+      .split(/[.\n]+/g)
+      .map((s) => s.trim())
+      .filter(Boolean),
+    property?.condition || "",
+    property?.legal_status || "",
+    property?.bank_financing_note || "",
+    property?.payment_facilities || "",
+    property?.estimated_monthly_fee || "",
+    property?.purchase_steps || "",
+    property?.purchase_timeline || "",
+    property?.transport_access || "",
+    property?.safety || "",
+    property?.floor_level || "",
+    ...(Array.isArray(property?.nearby_places) ? property.nearby_places : []),
+  ].filter(Boolean);
+
+  for (const piece of pieces) {
+    const n = normalizeText(piece);
+    if (norms.some((k) => n.includes(k))) return piece;
+  }
+
+  return "";
+}
+
+function looksLikeGeneralQuestion(text) {
+  const raw = String(text || "").trim();
+  const t = normalizeText(raw);
+  if (!t) return false;
+  if (raw.includes("?")) return true;
+
+  return [
+    "tiene ",
+    "tienen ",
+    "hay ",
+    "incluye ",
+    "incluyen ",
+    "cuenta con ",
+    "se puede ",
+    "cuanto ",
+    "cuánto ",
+    "como ",
+    "cómo ",
+    "donde ",
+    "dónde ",
+    "queda ",
+    "esta ",
+    "está ",
+    "es ",
+    "son ",
+    "tendra ",
+    "tendrá ",
+  ].some((k) => t.startsWith(normalizeText(k)));
+}
+
 function parseNumericValue(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -979,14 +1077,6 @@ function mergeLeadProfile(base = {}, extra = {}) {
   if (!Number.isFinite(Number(next.bathrooms))) next.bathrooms = null;
   else next.bathrooms = Number(next.bathrooms);
   return next;
-}
-
-function normalizeOperationKey(operation) {
-  const t = normalizeText(operation || "");
-  if (!t) return "";
-  if (t.includes("alquiler") || t.includes("renta")) return "alquiler";
-  if (t.includes("venta") || t.includes("compr")) return "venta";
-  return "";
 }
 
 function propertyMatchesCriteria(property, criteria = {}) {
@@ -1140,6 +1230,32 @@ function looksLikePropertyQuestion(textNorm) {
     "construccion",
     "construcción",
 
+    "parqueo",
+    "parqueos",
+    "parking",
+    "estacionamiento",
+    "marquesina",
+
+    "mantenimiento",
+    "incluye mantenimiento",
+    "paga mantenimiento",
+
+    "agua",
+    "servicio de agua",
+    "entrada de agua",
+    "salida de agua",
+    "cisterna",
+    "tinaco",
+
+    "luz",
+    "energia",
+    "energía",
+    "electricidad",
+    "electrica",
+    "eléctrica",
+    "servicio electrico",
+    "servicio eléctrico",
+
     "habitacion",
     "habitaciones",
     "cuarto",
@@ -1148,6 +1264,10 @@ function looksLikePropertyQuestion(textNorm) {
     "banos",
     "baño",
     "baños",
+    "banos comunes",
+    "baños comunes",
+    "bano comun",
+    "baño común",
 
     "ano construccion",
     "año construccion",
@@ -1162,6 +1282,36 @@ function looksLikePropertyQuestion(textNorm) {
     "asfaltada",
     "calle asfaltada",
 
+    "nivel",
+    "piso",
+    "primer nivel",
+    "segundo nivel",
+    "tercer nivel",
+    "4to nivel",
+    "2do nivel",
+
+    "balcon",
+    "balcón",
+    "patio",
+    "terraza",
+    "galeria",
+    "galería",
+    "jardin",
+    "jardín",
+    "piscina",
+    "jacuzzi",
+
+    "intercom",
+    "camara",
+    "cámara",
+    "camaras",
+    "cámaras",
+    "cerco electrico",
+    "cerco eléctrico",
+    "porton electrico",
+    "portón eléctrico",
+    "seguridad 24 horas",
+
     "queda",
     "ubicacion",
     "ubicación",
@@ -1172,11 +1322,13 @@ function looksLikePropertyQuestion(textNorm) {
     "por dónde queda",
     "donde esta",
     "dónde está",
+    "sector",
 
     "titulo",
     "título",
     "titulo deslindado",
     "título deslindado",
+    "deslinde",
 
     "hipoteca",
     "carga legal",
@@ -1210,7 +1362,6 @@ function looksLikePropertyQuestion(textNorm) {
     "traspaso",
     "costo de traspaso",
 
-    "sector",
     "colegios",
     "hospitales",
     "supermercados",
@@ -1221,6 +1372,13 @@ function looksLikePropertyQuestion(textNorm) {
     "seguridad",
     "acceso",
     "transporte",
+
+    "cuarto de servicio",
+    "area de lavado",
+    "área de lavado",
+    "lavado",
+    "despensa",
+    "desayunador",
 
     "pasos para comprar",
     "proceso de compra",
@@ -1247,6 +1405,7 @@ function buildUnknownPropertyAnswer(property, topic) {
 function answerPropertyQuestionHeuristic(property, userText) {
   const t = normalizeText(userText);
   const name = propertyPublicLabel(property);
+  const searchText = propertySearchText(property);
 
   if (property?.faq && typeof property.faq === "object") {
     for (const [key, value] of Object.entries(property.faq)) {
@@ -1262,15 +1421,52 @@ function answerPropertyQuestionHeuristic(property, userText) {
       : buildUnknownPropertyAnswer(property, "el precio");
   }
 
-  if (hasAnyKeyword(t, ["metros", "metro cuadrado", "metraje", "m2", "mt2", "area", "área", "solar", "construccion", "construcción"])) {
+  if (
+    hasAnyKeyword(t, [
+      "metros",
+      "metro cuadrado",
+      "metraje",
+      "m2",
+      "mt2",
+      "area",
+      "área",
+      "solar",
+      "construccion",
+      "construcción",
+    ])
+  ) {
     const parts = [];
     if (property?.lot_m2 !== "") parts.push(`solar de *${property.lot_m2} m²*`);
     if (property?.construction_m2 !== "") parts.push(`construcción de *${property.construction_m2} m²*`);
     if (!parts.length && property?.area_m2 !== "") parts.push(`área de *${property.area_m2} m²*`);
 
-    return parts.length
-      ? `Esta propiedad tiene ${parts.join(" y ")}.`
-      : buildUnknownPropertyAnswer(property, "los metros cuadrados");
+    if (parts.length) return `Esta propiedad tiene ${parts.join(" y ")}.`;
+
+    const piece = propertyFindRelevantPiece(property, ["m2", "mts2", "metro", "metros", "solar", "construccion"]);
+    return piece ? `Sobre los metros de *${name}*: ${piece}` : buildUnknownPropertyAnswer(property, "los metros cuadrados");
+  }
+
+  if (hasAnyKeyword(t, ["parqueo", "parqueos", "parking", "estacionamiento", "marquesina"])) {
+    if (property?.parking !== "" && property?.parking !== null && property?.parking !== undefined) {
+      return `*${name}* tiene *${property.parking}* parqueo(s).`;
+    }
+    if (searchText.includes("parqueo") || searchText.includes("parqueos") || searchText.includes("marquesina")) {
+      const piece = propertyFindRelevantPiece(property, ["parqueo", "parqueos", "marquesina"]);
+      return piece
+        ? `Sí, según la información registrada de *${name}*: ${piece}`
+        : `Sí, en la información registrada de *${name}* se menciona parqueo.`;
+    }
+    return buildUnknownPropertyAnswer(property, "si tiene parqueo");
+  }
+
+  if (hasAnyKeyword(t, ["banos comunes", "baños comunes", "bano comun", "baño común"])) {
+    if (searchText.includes("banos comunes") || searchText.includes("baños comunes") || searchText.includes("bano comun") || searchText.includes("baño común")) {
+      const piece = propertyFindRelevantPiece(property, ["banos comunes", "baños comunes", "bano comun", "baño común"]);
+      return piece
+        ? `Sobre *${name}*: ${piece}`
+        : `Sí, en la información registrada de *${name}* se mencionan baños comunes.`;
+    }
+    return buildUnknownPropertyAnswer(property, "si tiene baños comunes");
   }
 
   if (hasAnyKeyword(t, ["habitacion", "habitaciones", "cuarto", "cuartos", "bano", "banos", "baño", "baños"])) {
@@ -1278,9 +1474,146 @@ function answerPropertyQuestionHeuristic(property, userText) {
     if (property?.bedrooms !== "") parts.push(`*${property.bedrooms}* habitación(es)`);
     if (property?.bathrooms !== "") parts.push(`*${property.bathrooms}* baño(s)`);
 
-    return parts.length
-      ? `*${name}* tiene ${parts.join(" y ")}.`
+    if (parts.length) return `*${name}* tiene ${parts.join(" y ")}.`;
+
+    const piece = propertyFindRelevantPiece(property, ["habitacion", "habitaciones", "cuarto", "cuartos", "bano", "banos", "baño", "baños"]);
+    return piece
+      ? `Sobre *${name}*: ${piece}`
       : buildUnknownPropertyAnswer(property, "la cantidad de habitaciones y baños");
+  }
+
+  if (hasAnyKeyword(t, ["mantenimiento", "incluye mantenimiento", "paga mantenimiento"])) {
+    if (searchText.includes("no paga mantenimiento")) {
+      return `No, *${name}* no paga mantenimiento.`;
+    }
+    if (searchText.includes("incluye mantenimiento")) {
+      return `Sí, *${name}* incluye mantenimiento.`;
+    }
+    if (searchText.includes("mantenimiento")) {
+      const piece = propertyFindRelevantPiece(property, ["mantenimiento"]);
+      return piece
+        ? `Sobre el mantenimiento de *${name}*: ${piece}`
+        : `En la información registrada de *${name}* sí se menciona el mantenimiento.`;
+    }
+    return buildUnknownPropertyAnswer(property, "el mantenimiento");
+  }
+
+  if (hasAnyKeyword(t, ["agua", "servicio de agua", "entrada de agua", "salida de agua", "cisterna", "tinaco"])) {
+    const water = toBoolOrNull(property?.water_service);
+    if (water === true) return `Sí, *${name}* tiene servicio de agua.`;
+    if (water === false) return `No, *${name}* no tiene servicio de agua registrado.`;
+
+    if (
+      searchText.includes("agua") ||
+      searchText.includes("cisterna") ||
+      searchText.includes("tinaco")
+    ) {
+      const piece = propertyFindRelevantPiece(property, ["agua", "cisterna", "tinaco"]);
+      return piece
+        ? `Sobre el agua de *${name}*: ${piece}`
+        : `Sí, en la información registrada de *${name}* se menciona agua / cisterna / tinaco.`;
+    }
+    return buildUnknownPropertyAnswer(property, "el servicio de agua");
+  }
+
+  if (
+    hasAnyKeyword(t, [
+      "luz",
+      "energia",
+      "energía",
+      "electricidad",
+      "electrica",
+      "eléctrica",
+      "servicio electrico",
+      "servicio eléctrico",
+    ])
+  ) {
+    const electric = toBoolOrNull(property?.electric_service);
+    if (electric === true) return `Sí, *${name}* tiene servicio eléctrico.`;
+    if (electric === false) return `No, *${name}* no tiene servicio eléctrico registrado.`;
+
+    if (
+      searchText.includes("energia electrica") ||
+      searchText.includes("energía eléctrica") ||
+      searchText.includes("servicio electrico") ||
+      searchText.includes("servicio eléctrico")
+    ) {
+      const piece = propertyFindRelevantPiece(property, ["energia electrica", "energía eléctrica", "servicio electrico", "servicio eléctrico"]);
+      return piece
+        ? `Sobre la energía eléctrica de *${name}*: ${piece}`
+        : `Sí, en la información registrada de *${name}* se menciona energía eléctrica.`;
+    }
+    return buildUnknownPropertyAnswer(property, "el servicio eléctrico");
+  }
+
+  if (hasAnyKeyword(t, ["nivel", "piso", "primer nivel", "segundo nivel", "tercer nivel", "4to nivel", "2do nivel"])) {
+    if (property?.floor_level) {
+      return `El nivel / piso registrado de *${name}* es: *${property.floor_level}*.`;
+    }
+    const piece = propertyFindRelevantPiece(property, ["nivel", "piso", "primer nivel", "segundo nivel", "tercer nivel", "4to nivel", "2do nivel"]);
+    return piece
+      ? `Sobre el nivel de *${name}*: ${piece}`
+      : buildUnknownPropertyAnswer(property, "el nivel o piso");
+  }
+
+  if (
+    hasAnyKeyword(t, ["balcon", "balcón", "patio", "terraza", "galeria", "galería", "jardin", "jardín", "piscina", "jacuzzi"])
+  ) {
+    const piece = propertyFindRelevantPiece(property, [
+      "balcon",
+      "balcón",
+      "patio",
+      "terraza",
+      "galeria",
+      "galería",
+      "jardin",
+      "jardín",
+      "piscina",
+      "jacuzzi",
+    ]);
+    if (piece) return `Sobre las amenidades de *${name}*: ${piece}`;
+    return buildUnknownPropertyAnswer(property, "si tiene balcón, patio, terraza, jardín, piscina o jacuzzi");
+  }
+
+  if (
+    hasAnyKeyword(t, [
+      "intercom",
+      "camara",
+      "cámara",
+      "camaras",
+      "cámaras",
+      "cerco electrico",
+      "cerco eléctrico",
+      "porton electrico",
+      "portón eléctrico",
+      "seguridad 24 horas",
+      "seguridad",
+    ])
+  ) {
+    if (property?.safety) return `Sobre la seguridad de *${name}*: ${property.safety}`;
+    const piece = propertyFindRelevantPiece(property, [
+      "intercom",
+      "camara",
+      "cámara",
+      "camaras",
+      "cámaras",
+      "cerco electrico",
+      "cerco eléctrico",
+      "porton electrico",
+      "portón eléctrico",
+      "seguridad 24 horas",
+      "seguridad",
+    ]);
+    return piece
+      ? `Sobre la seguridad de *${name}*: ${piece}`
+      : buildUnknownPropertyAnswer(property, "la seguridad");
+  }
+
+  if (hasAnyKeyword(t, ["cuarto de servicio", "area de lavado", "área de lavado", "lavado", "despensa", "desayunador"])) {
+    const piece = propertyFindRelevantPiece(property, ["cuarto de servicio", "area de lavado", "área de lavado", "lavado", "despensa", "desayunador"]);
+    return piece
+      ? `Sobre los espacios interiores de *${name}*: ${piece}`
+      : buildUnknownPropertyAnswer(property, "los espacios interiores");
   }
 
   if (hasAnyKeyword(t, ["ano construccion", "año construccion", "construida", "cuando se construyo", "cuándo se construyó"])) {
@@ -1296,11 +1629,19 @@ function answerPropertyQuestionHeuristic(property, userText) {
   }
 
   if (hasAnyKeyword(t, ["cloaca"])) {
-    return `Sobre la cloaca: *${yesNoUnknown(property?.sewer)}*.`;
+    const sewer = toBoolOrNull(property?.sewer);
+    if (sewer === true) return `Sobre la cloaca: *Sí*.`;
+    if (sewer === false) return `Sobre la cloaca: *No*.`;
+    const piece = propertyFindRelevantPiece(property, ["cloaca"]);
+    return piece ? `Sobre la cloaca de *${name}*: ${piece}` : buildUnknownPropertyAnswer(property, "si tiene cloaca");
   }
 
   if (hasAnyKeyword(t, ["asfaltada", "calle asfaltada"])) {
-    return `Sobre la calle: *${yesNoUnknown(property?.paved_street)}*.`;
+    const paved = toBoolOrNull(property?.paved_street);
+    if (paved === true) return `Sobre la calle: *Sí, es asfaltada*.`;
+    if (paved === false) return `Sobre la calle: *No se registra como asfaltada*.`;
+    const piece = propertyFindRelevantPiece(property, ["asfaltada", "calle asfaltada"]);
+    return piece ? `Sobre la calle de *${name}*: ${piece}` : buildUnknownPropertyAnswer(property, "si la calle es asfaltada");
   }
 
   if (
@@ -1315,6 +1656,7 @@ function answerPropertyQuestionHeuristic(property, userText) {
       "por dónde queda",
       "donde esta",
       "dónde está",
+      "sector",
     ])
   ) {
     const parts = [];
@@ -1327,31 +1669,66 @@ function answerPropertyQuestionHeuristic(property, userText) {
       : buildUnknownPropertyAnswer(property, "la ubicación exacta");
   }
 
-  if (hasAnyKeyword(t, ["titulo", "título", "titulo deslindado", "título deslindado"])) {
-    return `Título / deslinde: *${yesNoUnknown(property?.title_deed)}*.`;
+  if (hasAnyKeyword(t, ["titulo", "título", "titulo deslindado", "título deslindado", "deslinde"])) {
+    const titleVal = toBoolOrNull(property?.title_deed);
+    if (titleVal === true) return `Título / deslinde: *Sí*.`;
+    if (titleVal === false) return `Título / deslinde: *No*.`;
+
+    if (searchText.includes("titulo deslindado") || searchText.includes("título deslindado") || searchText.includes("deslindado")) {
+      const piece = propertyFindRelevantPiece(property, ["titulo deslindado", "título deslindado", "deslindado"]);
+      return piece ? `Sobre el título de *${name}*: ${piece}` : `Sí, en la información registrada de *${name}* se menciona título deslindado.`;
+    }
+
+    return buildUnknownPropertyAnswer(property, "el título o deslinde");
   }
 
   if (hasAnyKeyword(t, ["hipoteca", "carga legal", "gravamen", "legal", "legalidad"])) {
     if (property?.legal_status) {
       return `Sobre la parte legal de *${name}*: ${property.legal_status}.`;
     }
-    return `Hipoteca o carga legal: *${yesNoUnknown(property?.has_mortgage)}*.`;
+    const mort = toBoolOrNull(property?.has_mortgage);
+    if (mort === true) return `Hipoteca o carga legal: *Sí*.`;
+    if (mort === false) return `Hipoteca o carga legal: *No*.`;
+    return buildUnknownPropertyAnswer(property, "la parte legal");
   }
 
   if (hasAnyKeyword(t, ["documentos", "documentacion", "documentación", "papeles", "al dia", "al día"])) {
-    return `Documentos al día: *${yesNoUnknown(property?.documents_up_to_date)}*.`;
+    const docs = toBoolOrNull(property?.documents_up_to_date);
+    if (docs === true) return `Documentos al día: *Sí*.`;
+    if (docs === false) return `Documentos al día: *No*.`;
+
+    if (searchText.includes("documentacion al dia") || searchText.includes("documentación al día") || searchText.includes("documentos al dia") || searchText.includes("documentos al día")) {
+      const piece = propertyFindRelevantPiece(property, ["documentacion", "documentación", "documentos", "al dia", "al día"]);
+      return piece ? `Sobre la documentación de *${name}*: ${piece}` : `Sí, en la información registrada de *${name}* se menciona documentación al día.`;
+    }
+
+    return buildUnknownPropertyAnswer(property, "la documentación");
   }
 
   if (hasAnyKeyword(t, ["financiamiento", "financiacion", "financiación", "banco", "financiar", "se puede financiar"])) {
-    const answer = `Financiamiento bancario: *${yesNoUnknown(property?.bank_financing)}*.`;
-    const note = property?.bank_financing_note ? ` ${property.bank_financing_note}` : "";
-    return `${answer}${note}`.trim();
+    const financing = toBoolOrNull(property?.bank_financing);
+    if (financing === true) {
+      const note = property?.bank_financing_note ? ` ${property.bank_financing_note}` : "";
+      return `Financiamiento bancario: *Sí*.${note}`.trim();
+    }
+    if (financing === false) return `Financiamiento bancario: *No*.`;
+
+    if (searchText.includes("financiamiento")) {
+      const piece = propertyFindRelevantPiece(property, ["financiamiento", "banco", "financiar"]);
+      return piece
+        ? `Sobre el financiamiento de *${name}*: ${piece}`
+        : `Sí, en la información registrada de *${name}* se menciona financiamiento.`;
+    }
+
+    return buildUnknownPropertyAnswer(property, "el financiamiento");
   }
 
   if (hasAnyKeyword(t, ["inicial", "separacion", "separación"])) {
-    return property?.down_payment
-      ? `El inicial / separación registrado para *${name}* es: *${property.down_payment}*.`
-      : buildUnknownPropertyAnswer(property, "el inicial");
+    if (property?.down_payment) {
+      return `El inicial / separación registrado para *${name}* es: *${property.down_payment}*.`;
+    }
+    const piece = propertyFindRelevantPiece(property, ["inicial", "separacion", "separación", "separalo", "sepáralo"]);
+    return piece ? `Sobre la separación de *${name}*: ${piece}` : buildUnknownPropertyAnswer(property, "el inicial");
   }
 
   if (hasAnyKeyword(t, ["facilidades de pago", "pago con el propietario", "facilidad de pago"])) {
@@ -1372,16 +1749,18 @@ function answerPropertyQuestionHeuristic(property, userText) {
       : buildUnknownPropertyAnswer(property, "el costo de traspaso");
   }
 
-  if (hasAnyKeyword(t, ["sector", "zona segura", "segura", "seguridad"])) {
+  if (hasAnyKeyword(t, ["zona segura", "segura", "seguridad"])) {
     return property?.safety
       ? `Sobre la zona de *${name}*: ${property.safety}`
       : buildUnknownPropertyAnswer(property, "el nivel de seguridad de la zona");
   }
 
   if (hasAnyKeyword(t, ["colegios", "hospitales", "supermercados", "cerca", "lugares cercanos"])) {
-    return property?.nearby_places?.length
-      ? `Cerca de *${name}* se tiene registrado: ${property.nearby_places.join(", ")}.`
-      : buildUnknownPropertyAnswer(property, "los lugares cercanos");
+    if (property?.nearby_places?.length) {
+      return `Cerca de *${name}* se tiene registrado: ${property.nearby_places.join(", ")}.`;
+    }
+    const piece = propertyFindRelevantPiece(property, ["colegio", "hospital", "supermercado", "cerca"]);
+    return piece ? `Sobre los lugares cercanos de *${name}*: ${piece}` : buildUnknownPropertyAnswer(property, "los lugares cercanos");
   }
 
   if (hasAnyKeyword(t, ["acceso", "transporte"])) {
@@ -2766,6 +3145,8 @@ app.post("/webhook", async (req, res) => {
       "menú principal",
     ].some((k) => tNorm === k || tNorm.includes(k));
 
+    const isPropertyQuestionLike = looksLikePropertyQuestion(tNorm) || looksLikeGeneralQuestion(userText);
+
     if (wantsRestart) {
       session.lastVisit = null;
       clearVisitFlow(session);
@@ -2799,7 +3180,7 @@ app.post("/webhook", async (req, res) => {
     if (
       !detectedPropertyEarly &&
       !session.selectedProperty &&
-      looksLikePropertyQuestion(tNorm) &&
+      isPropertyQuestionLike &&
       !shouldUseAdvisorSearch(userText)
     ) {
       await sendWhatsAppText(
@@ -2913,7 +3294,7 @@ app.post("/webhook", async (req, res) => {
     if (
       session.selectedProperty &&
       !detectedPropertyEarly &&
-      looksLikePropertyQuestion(tNorm) &&
+      isPropertyQuestionLike &&
       !detectedRangeEarly &&
       !wantsCancel &&
       !wantsReschedule &&
@@ -3122,7 +3503,7 @@ app.post("/webhook", async (req, res) => {
       if (!range) {
         session.state = "await_day";
 
-        if (looksLikePropertyQuestion(tNorm)) {
+        if (isPropertyQuestionLike) {
           const faqAnswer = await answerPropertyQuestionWithAI(detectedPropertyEarly, userText);
           await sendWhatsAppText(
             from,
@@ -3167,7 +3548,7 @@ app.post("/webhook", async (req, res) => {
     if (!detectedPropertyEarly && session.selectedProperty) {
       const range = parseDateRangeFromText(userText);
 
-      if (!range && session.state === "await_day" && looksLikePropertyQuestion(tNorm)) {
+      if (!range && session.state === "await_day" && isPropertyQuestionLike) {
         const faqAnswer = await answerPropertyQuestionWithAI(session.selectedProperty, userText);
         await sendWhatsAppText(
           from,
@@ -3199,7 +3580,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (session.state === "await_day") {
-        if (looksLikePropertyQuestion(tNorm)) {
+        if (isPropertyQuestionLike) {
           const faqAnswer = await answerPropertyQuestionWithAI(session.selectedProperty, userText);
           await sendWhatsAppText(
             from,
