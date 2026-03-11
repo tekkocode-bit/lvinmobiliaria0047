@@ -3186,7 +3186,53 @@ async function callOpenAIFallback({ session, userText, extraSystem = "" }) {
   return `Puedo ayudarte a ver el catálogo, entender lo que buscas, recomendar propiedades y agendar una visita. Escribe *catálogo* o dime qué tipo de propiedad buscas.`;
 }
 
-async function extractIncomingText(msg, session = null) {
+// =========================
+// Inbound parsing CRM vs BOT
+// =========================
+function extractIncomingTextForCrm(msg) {
+  if (!msg) return "";
+
+  if (msg?.text?.body) return msg.text.body;
+
+  if (msg?.type === "interactive" && msg?.interactive?.list_reply) {
+    return msg.interactive.list_reply.id || msg.interactive.list_reply.title || "";
+  }
+
+  if (msg?.type === "interactive" && msg?.interactive?.button_reply) {
+    return msg.interactive.button_reply.id || msg.interactive.button_reply.title || "";
+  }
+
+  if (msg?.type === "order" && msg?.order?.product_items?.length) {
+    return msg.order.product_items[0]?.product_retailer_id || "[CATALOG_ORDER]";
+  }
+
+  if (msg?.type === "audio" && msg?.audio?.id) return "[AUDIO]";
+
+  if (msg?.type === "location" && msg?.location) {
+    const { latitude, longitude, name, address } = msg.location;
+    return `📍 Ubicación: ${name || ""} ${address || ""} (${latitude}, ${longitude})`.trim();
+  }
+
+  if (msg?.type === "image" && msg?.image?.id) {
+    return cleanText(msg?.image?.caption) || "[IMAGE]";
+  }
+
+  if (msg?.type === "video" && msg?.video?.id) {
+    return cleanText(msg?.video?.caption) || "[VIDEO]";
+  }
+
+  if (msg?.type === "document" && msg?.document?.id) {
+    return cleanText(msg?.document?.filename) || "[DOCUMENT]";
+  }
+
+  if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
+  if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
+  if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
+
+  return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
+}
+
+async function resolveIncomingTextForBot(msg, session = null) {
   if (!msg) return "";
 
   if (msg?.text?.body) return msg.text.body;
@@ -3211,12 +3257,10 @@ async function extractIncomingText(msg, session = null) {
         downloaded.mimeType || msg?.audio?.mime_type || "audio/ogg"
       );
       const finalText = cleanText(transcription || "");
-
       if (session) session.mediaContext.lastAudioText = finalText;
-
       return finalText || "[AUDIO]";
     } catch (e) {
-      console.error("extractIncomingText audio error:", e?.message || e);
+      console.error("resolveIncomingTextForBot audio error:", e?.message || e);
       return "[AUDIO]";
     }
   }
@@ -3237,18 +3281,16 @@ async function extractIncomingText(msg, session = null) {
       );
 
       const finalText = cleanText(analysis?.normalized_user_text || caption || "");
-
       if (session) session.mediaContext.lastImageText = cleanText(analysis?.extracted_text || finalText || "");
-
       return finalText || caption || "[IMAGE]";
     } catch (e) {
-      console.error("extractIncomingText image error:", e?.message || e);
+      console.error("resolveIncomingTextForBot image error:", e?.message || e);
       return caption || "[IMAGE]";
     }
   }
 
-  if (msg?.type === "video" && msg?.video?.id) return msg?.video?.caption || "[VIDEO]";
-  if (msg?.type === "document" && msg?.document?.id) return msg?.document?.filename || "[DOCUMENT]";
+  if (msg?.type === "video" && msg?.video?.id) return cleanText(msg?.video?.caption) || "[VIDEO]";
+  if (msg?.type === "document" && msg?.document?.id) return cleanText(msg?.document?.filename) || "[DOCUMENT]";
   if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
   if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
   if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
@@ -3443,8 +3485,9 @@ app.post("/webhook", async (req, res) => {
     if (msgId && session.lastMsgId === msgId) return res.sendStatus(200);
     if (msgId) session.lastMsgId = msgId;
 
-    const userTextRaw = await extractIncomingText(msg, session);
-    const userText = String(userTextRaw || "").trim();
+    const rawUserText = extractIncomingTextForCrm(msg);
+    const resolvedUserText = await resolveIncomingTextForBot(msg, session);
+    const userText = String(resolvedUserText || rawUserText || "").trim();
     const tNorm = normalizeText(userText);
     if (!userText) return res.sendStatus(200);
 
@@ -3454,14 +3497,17 @@ app.post("/webhook", async (req, res) => {
     await bothubReportMessage({
       direction: "INBOUND",
       from: String(from),
-      body: String(userText),
+      body: String(rawUserText || ""),
       source: "WHATSAPP",
       waMessageId: msg?.id,
       name: value?.contacts?.[0]?.profile?.name,
       kind: inboundMetaWithMediaUrl?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
       meta: {
         ...inboundMetaWithMediaUrl,
-        aiResolvedText: userText,
+        aiResolvedText:
+          resolvedUserText && normalizeText(resolvedUserText) !== normalizeText(rawUserText)
+            ? resolvedUserText
+            : undefined,
       },
       mediaUrl: inboundMetaWithMediaUrl?.mediaUrl || undefined,
     });
