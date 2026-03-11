@@ -519,6 +519,10 @@ function defaultSession() {
     lastVisit: null,
     greeted: false,
     lastMsgId: null,
+
+    // ✅ NEW: takeover humano desde CRM
+    humanTakeover: false,
+
     reschedule: {
       active: false,
       visit_id: "",
@@ -561,6 +565,10 @@ function sanitizeSession(session) {
   }
   if (typeof session.state !== "string") session.state = "idle";
   if (typeof session.greeted !== "boolean") session.greeted = false;
+
+  // ✅ NEW: takeover humano
+  if (typeof session.humanTakeover !== "boolean") session.humanTakeover = false;
+
   return session;
 }
 
@@ -1402,6 +1410,46 @@ function buildUnknownPropertyAnswer(property, topic) {
   )}*. Si quieres, te paso con un asesor para validártelo.`;
 }
 
+async function answerPropertyQuestionWithAI(property, userText) {
+  const heuristic = answerPropertyQuestionHeuristic(property, userText);
+  if (!OPENAI_API_KEY || !REAL_ESTATE_AI_ENABLED) return heuristic;
+
+  try {
+    const resp = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: OPENAI_MODEL,
+        temperature: 0.1,
+        messages: [
+          {
+            role: "system",
+            content:
+              `Eres un asistente inmobiliario. Responde SOLO con base en la ficha de la propiedad suministrada. ` +
+              `No inventes datos. Si algo no está confirmado, dilo claramente y ofrece pasar con un asesor. ` +
+              `Responde en español, breve, natural y útil.`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              pregunta: userText,
+              propiedad: propertyFaqSnapshot(property),
+            }),
+          },
+        ],
+      },
+      {
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      }
+    );
+
+    const text = resp.data?.choices?.[0]?.message?.content?.trim();
+    return text || heuristic;
+  } catch (e) {
+    console.error("answerPropertyQuestionWithAI error:", e?.response?.data || e?.message || e);
+    return heuristic;
+  }
+}
+
 function answerPropertyQuestionHeuristic(property, userText) {
   const t = normalizeText(userText);
   const name = propertyPublicLabel(property);
@@ -1795,46 +1843,6 @@ function answerPropertyQuestionHeuristic(property, userText) {
   return property?.short_description
     ? `Sobre *${name}*: ${property.short_description}`
     : propertySummary(property);
-}
-
-async function answerPropertyQuestionWithAI(property, userText) {
-  const heuristic = answerPropertyQuestionHeuristic(property, userText);
-  if (!OPENAI_API_KEY || !REAL_ESTATE_AI_ENABLED) return heuristic;
-
-  try {
-    const resp = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: OPENAI_MODEL,
-        temperature: 0.1,
-        messages: [
-          {
-            role: "system",
-            content:
-              `Eres un asistente inmobiliario. Responde SOLO con base en la ficha de la propiedad suministrada. ` +
-              `No inventes datos. Si algo no está confirmado, dilo claramente y ofrece pasar con un asesor. ` +
-              `Responde en español, breve, natural y útil.`,
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              pregunta: userText,
-              propiedad: propertyFaqSnapshot(property),
-            }),
-          },
-        ],
-      },
-      {
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      }
-    );
-
-    const text = resp.data?.choices?.[0]?.message?.content?.trim();
-    return text || heuristic;
-  } catch (e) {
-    console.error("answerPropertyQuestionWithAI error:", e?.response?.data || e?.message || e);
-    return heuristic;
-  }
 }
 
 function buildSelectedPropertyNextStep(session) {
@@ -3062,6 +3070,47 @@ app.post("/agent_message", async (req, res) => {
   }
 });
 
+// ✅ NEW: endpoint para takeover / return to bot desde CRM
+app.post("/conversation_mode", async (req, res) => {
+  try {
+    if (!BOTHUB_WEBHOOK_SECRET) {
+      return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
+    }
+
+    const signature = getHubSignature(req);
+    const okSig = verifyHubSignature(req.body, signature, BOTHUB_WEBHOOK_SECRET);
+
+    if (!signature || !okSig) {
+      return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const { waTo, mode } = req.body || {};
+    const phone = String(waTo || "").replace(/[^\d]/g, "");
+    const normalizedMode = String(mode || "").toUpperCase().trim();
+
+    if (!phone) {
+      return res.status(400).json({ error: "waTo is required" });
+    }
+
+    if (!normalizedMode || !["HUMAN", "BOT"].includes(normalizedMode)) {
+      return res.status(400).json({ error: "mode must be HUMAN or BOT" });
+    }
+
+    const session = await getSession(phone);
+    session.humanTakeover = normalizedMode === "HUMAN";
+    await saveSession(phone, session);
+
+    return res.json({
+      ok: true,
+      phone,
+      humanTakeover: session.humanTakeover,
+    });
+  } catch (e) {
+    console.error("conversation_mode error:", e?.response?.data || e?.message || e);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
 app.get("/hub_media/:mediaId", async (req, res) => {
   try {
     const { mediaId } = req.params || {};
@@ -3129,6 +3178,11 @@ app.post("/webhook", async (req, res) => {
       meta: inboundMetaWithMediaUrl,
       mediaUrl: inboundMetaWithMediaUrl?.mediaUrl || undefined,
     });
+
+    // ✅ NEW: si está en takeover humano, solo reporta al CRM y NO responde
+    if (session.humanTakeover) {
+      return res.sendStatus(200);
+    }
 
     const wantsCancel = looksLikeCancel(tNorm) || isChoice(tNorm, 3);
     const wantsReschedule = looksLikeReschedule(tNorm) || isChoice(tNorm, 2);
