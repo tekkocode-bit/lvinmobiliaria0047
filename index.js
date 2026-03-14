@@ -132,6 +132,78 @@ function bufferToDataUrl(buffer, mimeType = "application/octet-stream") {
   return `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
 }
 
+function extractSharedContactsDetails(contacts = []) {
+  const list = Array.isArray(contacts) ? contacts : [];
+
+  return list.slice(0, 3).map((c) => {
+    const formattedName = cleanText(
+      c?.name?.formatted_name ||
+        [c?.name?.first_name, c?.name?.middle_name, c?.name?.last_name]
+          .map(cleanText)
+          .filter(Boolean)
+          .join(" ")
+    );
+
+    const phones = (Array.isArray(c?.phones) ? c.phones : [])
+      .map((p) => cleanText(p?.phone || p?.wa_id || p?.value))
+      .filter(Boolean);
+
+    const emails = (Array.isArray(c?.emails) ? c.emails : [])
+      .map((e) => cleanText(e?.email || e?.value))
+      .filter(Boolean);
+
+    const company = cleanText(c?.org?.company || "");
+    const department = cleanText(c?.org?.department || "");
+    const title = cleanText(c?.org?.title || "");
+
+    return {
+      name: formattedName,
+      phones,
+      emails,
+      company,
+      department,
+      title,
+    };
+  }).filter((c) => c.name || c.phones.length || c.emails.length || c.company || c.department || c.title);
+}
+
+function formatSharedContactsForText(contacts = []) {
+  const items = extractSharedContactsDetails(contacts);
+  if (!items.length) return "[CONTACTS]";
+
+  return items
+    .map((c, idx) => {
+      const parts = [];
+      if (c.name) parts.push(c.name);
+      if (c.phones.length) parts.push(`Tel: ${c.phones.join(", ")}`);
+      if (c.emails.length) parts.push(`Email: ${c.emails.join(", ")}`);
+      if (c.company) parts.push(`Empresa: ${c.company}`);
+      if (c.department) parts.push(`Depto: ${c.department}`);
+      if (c.title) parts.push(`Cargo: ${c.title}`);
+      return `Contacto ${idx + 1}: ${parts.join(" | ")}`;
+    })
+    .join("\n");
+}
+
+function getPrimarySharedContact(contacts = []) {
+  const items = extractSharedContactsDetails(contacts);
+  return items[0] || null;
+}
+
+function getPrimarySharedContactPhoneDigits(contacts = []) {
+  const c = getPrimarySharedContact(contacts);
+  if (!c?.phones?.length) return "";
+  for (const p of c.phones) {
+    const digits = normalizePhoneDigits(p);
+    if (digits) return digits;
+  }
+  return "";
+}
+
+function getPrimarySharedContactName(contacts = []) {
+  return cleanText(getPrimarySharedContact(contacts)?.name || "");
+}
+
 function defaultWorkHours() {
   return {
     mon: { start: "08:00", end: "17:30" },
@@ -524,6 +596,7 @@ function defaultSession() {
       category: "",
       zone_interest: "",
       budget: "",
+      budget_min: null,
       budget_max: null,
       bedrooms: null,
       bathrooms: null,
@@ -570,6 +643,7 @@ function sanitizeSession(session) {
     session.aiProfile = {
       ...defaultSession().aiProfile,
       ...session.aiProfile,
+      budget_min: Number.isFinite(Number(session.aiProfile?.budget_min)) ? Number(session.aiProfile.budget_min) : null,
       budget_max: Number.isFinite(Number(session.aiProfile?.budget_max)) ? Number(session.aiProfile.budget_max) : null,
       bedrooms: Number.isFinite(Number(session.aiProfile?.bedrooms)) ? Number(session.aiProfile.bedrooms) : null,
       bathrooms: Number.isFinite(Number(session.aiProfile?.bathrooms)) ? Number(session.aiProfile.bathrooms) : null,
@@ -871,12 +945,28 @@ function extractInboundMeta(msg) {
       address: msg?.location?.address,
     };
   }
-  if (msg?.type === "image") return { kind: "IMAGE", mediaId: msg?.image?.id, mimeType: msg?.image?.mime_type, caption: msg?.image?.caption };
-  if (msg?.type === "video") return { kind: "VIDEO", mediaId: msg?.video?.id, mimeType: msg?.video?.mime_type, caption: msg?.video?.caption };
-  if (msg?.type === "document") return { kind: "DOCUMENT", mediaId: msg?.document?.id, mimeType: msg?.document?.mime_type, filename: msg?.document?.filename };
-  if (msg?.type === "sticker") return { kind: "STICKER", mediaId: msg?.sticker?.id, mimeType: msg?.sticker?.mime_type };
-  if (msg?.type === "contacts") return { kind: "CONTACTS", count: msg?.contacts?.length || 0 };
-  if (msg?.type === "reaction") return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
+  if (msg?.type === "image") {
+    return { kind: "IMAGE", mediaId: msg?.image?.id, mimeType: msg?.image?.mime_type, caption: msg?.image?.caption };
+  }
+  if (msg?.type === "video") {
+    return { kind: "VIDEO", mediaId: msg?.video?.id, mimeType: msg?.video?.mime_type, caption: msg?.video?.caption };
+  }
+  if (msg?.type === "document") {
+    return { kind: "DOCUMENT", mediaId: msg?.document?.id, mimeType: msg?.document?.mime_type, filename: msg?.document?.filename };
+  }
+  if (msg?.type === "sticker") {
+    return { kind: "STICKER", mediaId: msg?.sticker?.id, mimeType: msg?.sticker?.mime_type };
+  }
+  if (msg?.type === "contacts") {
+    return {
+      kind: "CONTACTS",
+      count: msg?.contacts?.length || 0,
+      contacts: extractSharedContactsDetails(msg?.contacts || []),
+    };
+  }
+  if (msg?.type === "reaction") {
+    return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
+  }
   if (msg?.type === "order") {
     return {
       kind: "ORDER",
@@ -1270,6 +1360,105 @@ function parseNumericValue(value) {
   return n;
 }
 
+function extractBudgetRange(text) {
+  const raw = String(text || "").trim();
+  const t = normalizeText(raw);
+  if (!t) return { budget_min: null, budget_max: null, budget_label: "" };
+
+  const rangeMatch =
+    t.match(
+      /(?:entre|de)\s+(?:los\s+)?(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?\s*(?:y|a|-)\s*(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i
+    ) ||
+    t.match(
+      /([\d.,]+)\s*(k|mil|millon|millones|mm)?\s*-\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i
+    );
+
+  if (rangeMatch) {
+    let minRaw = "";
+    let maxRaw = "";
+
+    if (rangeMatch.length >= 7) {
+      const cur1 = rangeMatch[1] || rangeMatch[4] || "";
+      const num1 = rangeMatch[2] || "";
+      const suf1 = rangeMatch[3] || rangeMatch[6] || "";
+      const cur2 = rangeMatch[4] || rangeMatch[1] || "";
+      const num2 = rangeMatch[5] || "";
+      const suf2 = rangeMatch[6] || rangeMatch[3] || "";
+
+      minRaw = `${cur1}${num1}${suf1}`.trim();
+      maxRaw = `${cur2}${num2}${suf2}`.trim();
+    } else {
+      const num1 = rangeMatch[1] || "";
+      const suf1 = rangeMatch[2] || rangeMatch[4] || "";
+      const num2 = rangeMatch[3] || "";
+      const suf2 = rangeMatch[4] || rangeMatch[2] || "";
+      minRaw = `${num1}${suf1}`.trim();
+      maxRaw = `${num2}${suf2}`.trim();
+    }
+
+    const min = parseNumericValue(minRaw);
+    const max = parseNumericValue(maxRaw);
+
+    if (Number.isFinite(min) || Number.isFinite(max)) {
+      return {
+        budget_min: Number.isFinite(min) ? min : null,
+        budget_max: Number.isFinite(max) ? max : null,
+        budget_label: `entre ${minRaw} y ${maxRaw}`.trim(),
+      };
+    }
+  }
+
+  const hastaMatch = t.match(/(?:hasta|maximo|máximo|tope de)\s+(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i);
+  if (hastaMatch) {
+    const maxRaw = `${hastaMatch[1] || ""}${hastaMatch[2] || ""}${hastaMatch[3] || ""}`.trim();
+    const max = parseNumericValue(maxRaw);
+    if (Number.isFinite(max)) {
+      return {
+        budget_min: null,
+        budget_max: max,
+        budget_label: `hasta ${maxRaw}`.trim(),
+      };
+    }
+  }
+
+  const desdeMatch = t.match(/(?:desde|minimo|mínimo)\s+(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i);
+  if (desdeMatch) {
+    const minRaw = `${desdeMatch[1] || ""}${desdeMatch[2] || ""}${desdeMatch[3] || ""}`.trim();
+    const min = parseNumericValue(minRaw);
+    if (Number.isFinite(min)) {
+      return {
+        budget_min: min,
+        budget_max: null,
+        budget_label: `desde ${minRaw}`.trim(),
+      };
+    }
+  }
+
+  return { budget_min: null, budget_max: null, budget_label: "" };
+}
+
+function looksLikeBudgetSearch(text) {
+  const t = normalizeText(text || "");
+  if (!t) return false;
+
+  return (
+    /\bentre\b/.test(t) ||
+    /\bhasta\b/.test(t) ||
+    /\bdesde\b/.test(t) ||
+    /\bmaximo\b/.test(t) ||
+    /\bmáximo\b/.test(t) ||
+    /\bminimo\b/.test(t) ||
+    /\bmínimo\b/.test(t) ||
+    /\bpresupuesto\b/.test(t) ||
+    /\bmil\b/.test(t) ||
+    /\bk\b/.test(t) ||
+    /\brd\$\b/.test(t) ||
+    /\bus\$\b/.test(t) ||
+    /\busd\b/.test(t) ||
+    /\d+\s*-\s*\d+/.test(t)
+  );
+}
+
 function propertyPriceNumber(property) {
   return parseNumericValue(property?.price);
 }
@@ -1299,12 +1488,18 @@ function mergeLeadProfile(base = {}, extra = {}) {
     if (v === null || v === undefined || v === "") continue;
     next[k] = v;
   }
+  if (!Number.isFinite(Number(next.budget_min))) next.budget_min = null;
+  else next.budget_min = Number(next.budget_min);
+
   if (!Number.isFinite(Number(next.budget_max))) next.budget_max = null;
   else next.budget_max = Number(next.budget_max);
+
   if (!Number.isFinite(Number(next.bedrooms))) next.bedrooms = null;
   else next.bedrooms = Number(next.bedrooms);
+
   if (!Number.isFinite(Number(next.bathrooms))) next.bathrooms = null;
   else next.bathrooms = Number(next.bathrooms);
+
   return next;
 }
 
@@ -1313,6 +1508,7 @@ function propertyMatchesCriteria(property, criteria = {}) {
   const category = normalizeText(criteria.category || "");
   const operation = normalizeOperationKey(criteria.operation || criteria.intent || "");
   const zone = normalizeText(criteria.zone_interest || criteria.zone || "");
+  const budgetMin = Number(criteria.budget_min);
   const budgetMax = Number(criteria.budget_max);
   const bedrooms = Number(criteria.bedrooms);
   const bathrooms = Number(criteria.bathrooms);
@@ -1326,10 +1522,13 @@ function propertyMatchesCriteria(property, criteria = {}) {
     const haystack = normalizeText(`${property.location || ""} ${property.title || ""} ${property.short_description || ""}`);
     if (!haystack.includes(zone)) return false;
   }
-  if (Number.isFinite(budgetMax) && budgetMax > 0) {
-    const price = propertyPriceNumber(property);
-    if (Number.isFinite(price) && price > budgetMax) return false;
+
+  const price = propertyPriceNumber(property);
+  if (Number.isFinite(price)) {
+    if (Number.isFinite(budgetMin) && budgetMin > 0 && price < budgetMin) return false;
+    if (Number.isFinite(budgetMax) && budgetMax > 0 && price > budgetMax) return false;
   }
+
   if (Number.isFinite(bedrooms) && bedrooms > 0) {
     const propBedrooms = Number(property?.bedrooms);
     if (Number.isFinite(propBedrooms) && propBedrooms < bedrooms) return false;
@@ -1346,6 +1545,7 @@ function rankPropertyMatch(property, criteria = {}) {
   const zone = normalizeText(criteria.zone_interest || criteria.zone || "");
   const operation = normalizeOperationKey(criteria.operation || "");
   const category = normalizeText(criteria.category || "");
+  const budgetMin = Number(criteria.budget_min);
   const budgetMax = Number(criteria.budget_max);
   const price = propertyPriceNumber(property);
 
@@ -1353,12 +1553,21 @@ function rankPropertyMatch(property, criteria = {}) {
     const haystack = normalizeText(`${property.location || ""} ${property.title || ""}`);
     if (haystack.includes(zone)) score += 3;
   }
+
   if (operation && normalizeOperationKey(property.operation || property.category || "") === operation) score += 2;
   if (category && normalizeText(property.category || "") === category) score += 2;
-  if (Number.isFinite(budgetMax) && Number.isFinite(price)) {
-    score += price <= budgetMax ? 2 : -2;
-    score -= Math.abs(budgetMax - price) / Math.max(1, budgetMax) < 0.2 ? 0 : 1;
+
+  if (Number.isFinite(price)) {
+    if (Number.isFinite(budgetMin) && Number.isFinite(budgetMax) && budgetMin > 0 && budgetMax > 0) {
+      if (price >= budgetMin && price <= budgetMax) score += 3;
+      else score -= 2;
+    } else if (Number.isFinite(budgetMax) && budgetMax > 0) {
+      score += price <= budgetMax ? 2 : -2;
+    } else if (Number.isFinite(budgetMin) && budgetMin > 0) {
+      score += price >= budgetMin ? 2 : -2;
+    }
   }
+
   if (Number.isFinite(Number(criteria.bedrooms)) && Number(property?.bedrooms) >= Number(criteria.bedrooms)) score += 1;
   if (Number.isFinite(Number(criteria.bathrooms)) && Number(property?.bathrooms) >= Number(criteria.bathrooms)) score += 1;
   return score;
@@ -1386,7 +1595,7 @@ function buildRecommendationIntro(criteria = {}) {
   if (criteria.operation) bits.push(propertyOperationLabel(criteria.operation));
   if (criteria.category) bits.push(categoryTitle(criteria.category));
   if (criteria.zone_interest) bits.push(`en ${criteria.zone_interest}`);
-  if (criteria.budget) bits.push(`presupuesto ${criteria.budget}`);
+  if (criteria.budget) bits.push(`con presupuesto ${criteria.budget}`);
   return bits.join(" ").trim();
 }
 
@@ -1413,31 +1622,42 @@ function tryPickRecommendedPropertyFromUserText(session, userText) {
 function shouldUseAdvisorSearch(textNorm) {
   const t = normalizeText(textNorm || "");
   if (!t) return false;
-  return [
-    "busco",
-    "buscando",
-    "quiero",
-    "necesito",
-    "estoy buscando",
-    "me interesa",
-    "presupuesto",
-    "comprar",
-    "alquilar",
-    "rentar",
-    "invertir",
-    "apartamento",
-    "apto",
-    "casa",
-    "solar",
-    "proyecto",
-    "local",
-    "habitacion",
-    "habitaciones",
-    "bano",
-    "banos",
-    "zona",
-    "sector",
-  ].some((k) => t.includes(k));
+
+  return (
+    [
+      "busco",
+      "buscando",
+      "quiero",
+      "necesito",
+      "estoy buscando",
+      "me interesa",
+      "presupuesto",
+      "comprar",
+      "alquilar",
+      "rentar",
+      "invertir",
+      "apartamento",
+      "apto",
+      "casa",
+      "solar",
+      "proyecto",
+      "local",
+      "habitacion",
+      "habitaciones",
+      "bano",
+      "banos",
+      "zona",
+      "sector",
+      "apartaestudio",
+      "estudio",
+      "unitaria",
+      "unidad",
+      "opciones",
+      "disponible",
+      "disponibles",
+    ].some((k) => t.includes(k)) ||
+    looksLikeBudgetSearch(t)
+  );
 }
 
 function looksLikePropertyQuestion(textNorm) {
@@ -2109,7 +2329,7 @@ async function extractLeadCriteriaWithAI(userText, session) {
         content:
           `Extrae intención inmobiliaria del mensaje del usuario y responde SOLO JSON válido. ` +
           `Usa estas categorías exactas: alquiler, venta, solares, proyectos, locales_comerciales, casas, apartamentos. ` +
-          `Campos: intent, operation, category, zone_interest, budget, budget_max, bedrooms, bathrooms, purpose, timeline, wants_visit, summary. ` +
+          `Campos: intent, operation, category, zone_interest, budget, budget_min, budget_max, bedrooms, bathrooms, purpose, timeline, wants_visit, summary. ` +
           `No inventes valores. Si no está claro usa cadena vacía o null.\n\n` +
           `Catálogo resumido:\n${summarizeCatalogForPrompt(30)}`,
       },
@@ -2137,6 +2357,7 @@ async function extractLeadCriteriaWithAI(userText, session) {
       category: parsed.category || fallback?.category || "",
       zone_interest: parsed.zone_interest || fallback?.zone_interest || "",
       budget: parsed.budget || fallback?.budget || "",
+      budget_min: Number.isFinite(Number(parsed.budget_min)) ? Number(parsed.budget_min) : fallback?.budget_min ?? null,
       budget_max: Number.isFinite(Number(parsed.budget_max)) ? Number(parsed.budget_max) : fallback?.budget_max ?? null,
       bedrooms: Number.isFinite(Number(parsed.bedrooms)) ? Number(parsed.bedrooms) : fallback?.bedrooms ?? null,
       bathrooms: Number.isFinite(Number(parsed.bathrooms)) ? Number(parsed.bathrooms) : fallback?.bathrooms ?? null,
@@ -2154,12 +2375,15 @@ function extractLeadCriteriaHeuristic(userText, session) {
   const t = normalizeText(userText || "");
   if (!t) return null;
 
+  const budgetRange = extractBudgetRange(userText);
+
   const criteria = {
     operation: "",
     category: "",
     zone_interest: "",
     budget: "",
-    budget_max: null,
+    budget_min: budgetRange.budget_min,
+    budget_max: budgetRange.budget_max,
     bedrooms: null,
     bathrooms: null,
     purpose: "",
@@ -2180,17 +2404,21 @@ function extractLeadCriteriaHeuristic(userText, session) {
   const bathMatch = t.match(/(\d+)\s*(bano|banos|bañ[oa]s?)/);
   if (bathMatch) criteria.bathrooms = Number(bathMatch[1]);
 
-  const budgetMatch = t.match(/(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i);
-  if (t.includes("presupuesto") || t.includes("maximo") || t.includes("máximo") || t.includes("hasta") || budgetMatch) {
-    const rawBudget = budgetMatch ? `${budgetMatch[1] || ""}${budgetMatch[2] || ""}${budgetMatch[3] || ""}`.trim() : "";
-    const parsedBudget = parseNumericValue(rawBudget);
-    if (rawBudget) criteria.budget = rawBudget;
-    if (Number.isFinite(parsedBudget)) criteria.budget_max = parsedBudget;
+  if (budgetRange.budget_label) {
+    criteria.budget = budgetRange.budget_label;
+  } else {
+    const budgetMatch = t.match(/(rd\$|us\$|usd)?\s*([\d.,]+)\s*(k|mil|millon|millones|mm)?/i);
+    if (t.includes("presupuesto") || t.includes("maximo") || t.includes("máximo") || t.includes("hasta") || budgetMatch) {
+      const rawBudget = budgetMatch ? `${budgetMatch[1] || ""}${budgetMatch[2] || ""}${budgetMatch[3] || ""}`.trim() : "";
+      const parsedBudget = parseNumericValue(rawBudget);
+      if (rawBudget) criteria.budget = rawBudget;
+      if (Number.isFinite(parsedBudget)) criteria.budget_max = parsedBudget;
+    }
   }
 
   const zonePatterns = [
     /(?:en|por|de|zona|sector)\s+([a-z0-9áéíóúñ\- ]{3,40})$/i,
-    /(?:en|por|de|zona|sector)\s+([a-z0-9áéíóúñ\- ]{3,40})(?:\s+con|\s+y|\s+de\s+\d|\s+para|\s+maximo|\s+máximo|\s+hasta)/i,
+    /(?:en|por|de|zona|sector)\s+([a-z0-9áéíóúñ\- ]{3,40})(?:\s+con|\s+y|\s+de\s+\d|\s+para|\s+maximo|\s+máximo|\s+hasta|\s+entre)/i,
   ];
   for (const rx of zonePatterns) {
     const m = String(userText || "").match(rx);
@@ -2202,7 +2430,8 @@ function extractLeadCriteriaHeuristic(userText, session) {
 
   if (!criteria.zone_interest && session?.aiProfile?.zone_interest) criteria.zone_interest = session.aiProfile.zone_interest;
   if (!criteria.budget && session?.aiProfile?.budget) criteria.budget = session.aiProfile.budget;
-  if (!criteria.budget_max && session?.aiProfile?.budget_max) criteria.budget_max = session.aiProfile.budget_max;
+  if (criteria.budget_min == null && session?.aiProfile?.budget_min != null) criteria.budget_min = session.aiProfile.budget_min;
+  if (criteria.budget_max == null && session?.aiProfile?.budget_max != null) criteria.budget_max = session.aiProfile.budget_max;
 
   return criteria;
 }
@@ -2336,7 +2565,7 @@ function detectCategoryKeyFromUser(text) {
   if (t.includes("proyecto")) return "proyectos";
   if (t.includes("local")) return "locales_comerciales";
   if (t.includes("casa")) return "casas";
-  if (t.includes("apartamento") || t.includes("apto")) return "apartamentos";
+  if (t.includes("apartamento") || t.includes("apto") || t.includes("apartaestudio") || t.includes("estudio")) return "apartamentos";
 
   return null;
 }
@@ -3226,7 +3455,11 @@ function extractIncomingTextForCrm(msg) {
   }
 
   if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
-  if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
+
+  if (msg?.type === "contacts" && msg?.contacts?.length) {
+    return formatSharedContactsForText(msg.contacts);
+  }
+
   if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
 
   return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
@@ -3292,7 +3525,18 @@ async function resolveIncomingTextForBot(msg, session = null) {
   if (msg?.type === "video" && msg?.video?.id) return cleanText(msg?.video?.caption) || "[VIDEO]";
   if (msg?.type === "document" && msg?.document?.id) return cleanText(msg?.document?.filename) || "[DOCUMENT]";
   if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
-  if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
+
+  if (msg?.type === "contacts" && msg?.contacts?.length) {
+    const summary = formatSharedContactsForText(msg.contacts);
+    const primaryName = getPrimarySharedContactName(msg.contacts);
+    const primaryPhone = getPrimarySharedContactPhoneDigits(msg.contacts);
+
+    if (session?.state === "await_phone" && primaryPhone) return primaryPhone;
+    if (session?.state === "await_name" && primaryName) return primaryName;
+
+    return summary;
+  }
+
   if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
 
   return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
