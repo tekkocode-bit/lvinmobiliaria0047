@@ -3,6 +3,7 @@ import axios from "axios";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import multer from "multer";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -717,6 +718,48 @@ function uniqueUrlList(...groups) {
   return out;
 }
 
+function buildCloudinarySignature(params = {}, apiSecret = "") {
+  const payload = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return crypto.createHash("sha1").update(`${payload}${apiSecret}`).digest("hex");
+}
+
+function inferCloudinaryResourceType(file = {}, fallback = "image") {
+  const mime = cleanText(file?.mimetype || file?.mime_type || "").toLowerCase();
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("image/")) return "image";
+  return cleanText(fallback || "image") === "video" ? "video" : "image";
+}
+
+async function uploadBufferToCloudinary({ cloudName, apiKey, apiSecret, buffer, mimeType, filename, folder = "", resourceType = "image" }) {
+  const targetType = resourceType === "video" ? "video" : "image";
+  const timestamp = Math.floor(Date.now() / 1000);
+  const safeFolder = cleanText(folder);
+  const signatureParams = { timestamp, ...(safeFolder ? { folder: safeFolder } : {}) };
+  const signature = buildCloudinarySignature(signatureParams, apiSecret);
+  const form = new FormData();
+  form.append("file", new Blob([buffer], { type: mimeType || "application/octet-stream" }), cleanText(filename || `upload-${timestamp}`));
+  if (safeFolder) form.append("folder", safeFolder);
+  form.append("api_key", apiKey);
+  form.append("timestamp", String(timestamp));
+  form.append("signature", signature);
+
+  const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/${targetType}/upload`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Cloudinary respondió ${response.status}`);
+  }
+
+  return response.json();
+}
+
 function buildImportedPropertyFromMetaProduct(product = {}, existing = null, currentItems = []) {
   const description = cleanText(product?.description || existing?.short_description || "");
   const operation = detectOperationFromText(`${product?.name || ""} ${description}`, existing?.operation || "venta");
@@ -830,6 +873,19 @@ export function createCatalogAdmin(options = {}) {
   const getCatalog = typeof options.getCatalog === "function" ? options.getCatalog : () => [];
   const setCatalog = typeof options.setCatalog === "function" ? options.setCatalog : async () => {};
   const extraMetaFields = options.extraMetaFields || {};
+  const CLOUDINARY_CLOUD_NAME = cleanText(options.cloudinaryCloudName || process.env.CLOUDINARY_CLOUD_NAME || "");
+  const CLOUDINARY_API_KEY = cleanText(options.cloudinaryApiKey || process.env.CLOUDINARY_API_KEY || "");
+  const CLOUDINARY_API_SECRET = cleanText(options.cloudinaryApiSecret || process.env.CLOUDINARY_API_SECRET || "");
+  const CLOUDINARY_DEFAULT_FOLDER = cleanText(options.cloudinaryDefaultFolder || process.env.CLOUDINARY_DEFAULT_FOLDER || process.env.CATALOG_ADMIN_CLOUDINARY_FOLDER || "");
+  const CLOUDINARY_MAX_FILE_MB = Number(options.cloudinaryMaxFileMb || process.env.CLOUDINARY_MAX_FILE_MB || 30);
+  const cloudinaryReady = !!(CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET);
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      files: 30,
+      fileSize: Math.max(1, CLOUDINARY_MAX_FILE_MB) * 1024 * 1024,
+    },
+  });
 
   let store = { properties: dedupeProperties(getCatalog()) };
   const syncState = {
@@ -1236,6 +1292,9 @@ export function createCatalogAdmin(options = {}) {
         metaReady: !!(META_ACCESS_TOKEN && META_CATALOG_ID),
         metaImportReady: !!(META_ACCESS_TOKEN && META_CATALOG_ID),
         metaCatalogId: META_CATALOG_ID || null,
+        cloudinaryReady,
+        cloudinaryCloudName: CLOUDINARY_CLOUD_NAME || null,
+        cloudinaryDefaultFolder: CLOUDINARY_DEFAULT_FOLDER || null,
         autoSyncOnSave: AUTO_SYNC_ON_SAVE,
       },
       syncState,
@@ -1258,6 +1317,58 @@ export function createCatalogAdmin(options = {}) {
     const current = req.body?.current && typeof req.body.current === "object" ? req.body.current : {};
     const parsed = parseListingTextToProperty(text, current, store.properties);
     res.json({ ok: true, item: parsed, metaPreview: buildMetaPayload(parsed, { metaUrl: META_DEFAULT_URL, metaImageUrl: META_DEFAULT_IMAGE_URL, metaAvailability: META_DEFAULT_AVAILABILITY }, { extraMetaFields }) });
+  });
+
+  router.post("/api/uploads/cloudinary", requireAuth, upload.array("files", 30), async (req, res) => {
+    try {
+      if (!cloudinaryReady) {
+        return res.status(400).json({ ok: false, error: "Faltan CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY o CLOUDINARY_API_SECRET." });
+      }
+
+      const files = Array.isArray(req.files) ? req.files : [];
+      if (!files.length) {
+        return res.status(400).json({ ok: false, error: "Debes seleccionar al menos un archivo." });
+      }
+
+      const requestedKind = cleanText(req.body?.kind || "").toLowerCase();
+      const folder = cleanText(req.body?.folder || CLOUDINARY_DEFAULT_FOLDER || "");
+      const uploaded = [];
+
+      for (const file of files) {
+        const resourceType = requestedKind === "video" || requestedKind === "image"
+          ? requestedKind
+          : inferCloudinaryResourceType(file, "image");
+
+        const result = await uploadBufferToCloudinary({
+          cloudName: CLOUDINARY_CLOUD_NAME,
+          apiKey: CLOUDINARY_API_KEY,
+          apiSecret: CLOUDINARY_API_SECRET,
+          buffer: file.buffer,
+          mimeType: file.mimetype,
+          filename: file.originalname,
+          folder,
+          resourceType,
+        });
+
+        uploaded.push({
+          url: cleanText(result?.secure_url || result?.url || ""),
+          secure_url: cleanText(result?.secure_url || result?.url || ""),
+          type: resourceType === "video" ? "video" : "image",
+          public_id: cleanText(result?.public_id || ""),
+          format: cleanText(result?.format || ""),
+          bytes: Number(result?.bytes || 0),
+          width: result?.width ?? null,
+          height: result?.height ?? null,
+          duration: result?.duration ?? null,
+          folder: cleanText(result?.folder || folder || ""),
+          original_filename: cleanText(result?.original_filename || file.originalname || ""),
+        });
+      }
+
+      return res.json({ ok: true, uploaded, count: uploaded.length, folder });
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: error.message || "No se pudo subir a Cloudinary." });
+    }
   });
 
   router.post("/api/properties/import", requireAuth, async (req, res) => {
