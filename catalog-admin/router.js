@@ -111,24 +111,71 @@ function parseFlexibleNumber(token) {
   return Number.isFinite(n) ? n : "";
 }
 
+function normalizeNumericChunk(value) {
+  const raw = cleanText(value).replace(/\s+/g, "");
+  if (!raw) return "";
+
+  const dotCount = (raw.match(/\./g) || []).length;
+  const commaCount = (raw.match(/,/g) || []).length;
+  const totalSeparators = dotCount + commaCount;
+
+  if (!totalSeparators) return raw;
+
+  if (dotCount && commaCount) {
+    const lastDot = raw.lastIndexOf(".");
+    const lastComma = raw.lastIndexOf(",");
+    const decimalPos = Math.max(lastDot, lastComma);
+    const decimalLen = raw.length - decimalPos - 1;
+
+    if (decimalLen >= 1 && decimalLen <= 2) {
+      const decimalSep = raw[decimalPos];
+      const thousandsRx = decimalSep === "." ? /,/g : /\./g;
+      return raw.replace(thousandsRx, "").replace(decimalSep, ".");
+    }
+
+    return raw.replace(/[.,]/g, "");
+  }
+
+  const sep = dotCount ? "." : ",";
+  if (totalSeparators > 1) return raw.replace(/[.,]/g, "");
+
+  const sepPos = raw.lastIndexOf(sep);
+  const decimalLen = raw.length - sepPos - 1;
+
+  if (decimalLen === 3 || decimalLen > 3) return raw.replace(/[.,]/g, "");
+  if (decimalLen >= 1 && decimalLen <= 2) return raw.replace(sep, ".");
+  return raw.replace(/[.,]/g, "");
+}
+
 function parsePriceNumber(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  let text = normalizeText(raw);
-  const hasMillion = text.includes("millon") || text.includes("millones") || /\bmm\b/.test(text);
-  const hasThousand = /\bk\b/.test(text) || text.includes(" mil") || /^mil\b/.test(text);
-  text = text
+
+  let text = normalizeText(raw)
     .replace(/rd\$/g, "")
     .replace(/us\$/g, "")
     .replace(/usd/g, "")
+    .replace(/dop\$/g, "")
     .replace(/dop/g, "")
-    .replace(/,/g, "");
-  const match = text.match(/\d+(?:\.\d+)?/);
+    .replace(/pesos?/g, "")
+    .replace(/mensual(?:es)?/g, "")
+    .replace(/precio\s*/g, "")
+    .replace(/pagar\s*/g, "")
+    .trim();
+
+  const hasMillion = text.includes("millon") || text.includes("millones") || /\bmm\b/.test(text);
+  const hasThousand = /\bk\b/.test(text) || text.includes(" mil") || /^mil\b/.test(text);
+
+  const match = text.match(/\d[\d.,]*/);
   if (!match) return "";
-  let n = Number(match[0]);
+
+  const normalized = normalizeNumericChunk(match[0]);
+  let n = Number(normalized);
   if (!Number.isFinite(n)) return "";
+
   if (hasMillion) n *= 1000000;
   else if (hasThousand && n < 100000) n *= 1000;
+
   return String(Math.round(n));
 }
 
