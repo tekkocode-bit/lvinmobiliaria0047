@@ -646,12 +646,45 @@ function sanitizeMetaImportedDescription(value = "") {
   return cleanText(String(value || "").replace(/\bpropiedad en (venta|alquiler)\.?/gi, "").replace(/\s+/g, " "));
 }
 
+function normalizeMetaUrlArray(value) {
+  if (Array.isArray(value)) return value.map((item) => cleanText(item?.url || item)).filter(Boolean);
+  const parsed = typeof value === "string" ? safeJson(value, null) : null;
+  if (Array.isArray(parsed)) return parsed.map((item) => cleanText(item?.url || item)).filter(Boolean);
+  if (parsed && typeof parsed === "object") {
+    return Object.values(parsed).map((item) => cleanText(item?.url || item)).filter(Boolean);
+  }
+  return parseList(value).map((item) => cleanText(item)).filter(Boolean);
+}
+
+function uniqueUrlList(...groups) {
+  const seen = new Set();
+  const out = [];
+  for (const group of groups) {
+    for (const item of normalizeMetaUrlArray(group)) {
+      const key = cleanText(item);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  return out;
+}
+
 function buildImportedPropertyFromMetaProduct(product = {}, existing = null, currentItems = []) {
   const description = cleanText(product?.description || existing?.short_description || "");
   const operation = detectOperationFromText(`${product?.name || ""} ${description}`, existing?.operation || "venta");
   const category = detectCategoryFromText(`${product?.name || ""} ${description}`, existing?.category || "apartamentos");
   const location = extractLocationFromText(description, existing?.location || "");
   const title = extractTitleFromText(product?.name || existing?.title || "", operation, category, location);
+  const primaryMetaImage = cleanText(product?.image_url || existing?.meta_image_url || existing?.primary_image_url || "");
+  const additionalMetaImages = uniqueUrlList(
+    product?.additional_image_urls,
+    product?.additional_image_cdn_urls,
+    product?.additional_images,
+    existing?.meta_additional_image_urls
+  ).filter((url) => url !== primaryMetaImage);
+  const mergedImages = uniqueUrlList(primaryMetaImage ? [primaryMetaImage] : [], additionalMetaImages, existing?.image_urls);
+
   const base = {
     ...(existing || {}),
     id: cleanText(existing?.id || product?.retailer_id || product?.id || ""),
@@ -665,7 +698,8 @@ function buildImportedPropertyFromMetaProduct(product = {}, existing = null, cur
     location,
     short_description: sanitizeMetaImportedDescription(description) || cleanText(existing?.short_description || ""),
     meta_url: cleanText(product?.url || existing?.meta_url || ""),
-    meta_image_url: cleanText(product?.image_url || existing?.meta_image_url || ""),
+    meta_image_url: primaryMetaImage,
+    meta_additional_image_urls: additionalMetaImages,
     meta_availability: cleanText(product?.availability || existing?.meta_availability || "in stock") || "in stock",
     bedrooms: existing?.bedrooms !== undefined && existing?.bedrooms !== "" ? existing.bedrooms : extractMetric(description, [/([\d.,]+)\s*(?:hab|habitaciones?|cuartos?)/i]),
     bathrooms: existing?.bathrooms !== undefined && existing?.bathrooms !== "" ? existing.bathrooms : extractMetric(description, [/([\d.,]+)\s*(?:baños?|banos?)/i]),
@@ -673,8 +707,9 @@ function buildImportedPropertyFromMetaProduct(product = {}, existing = null, cur
     area_m2: existing?.area_m2 !== undefined && existing?.area_m2 !== "" ? existing.area_m2 : extractMetric(description, [/([\d.,]+)\s*(?:m2|mt2|mts2|m²)/i]),
     agent_phone: cleanText(existing?.agent_phone || extractAgentPhone(description, "")),
     agent_name: cleanText(existing?.agent_name || extractAgentName(description, "")),
-    image_urls: existing?.image_urls || [cleanText(product?.image_url || "")].filter(Boolean),
-    primary_image_url: cleanText(existing?.primary_image_url || product?.image_url || ""),
+    image_urls: mergedImages,
+    primary_image_url: cleanText(existing?.primary_image_url || primaryMetaImage || mergedImages[0] || ""),
+    video_urls: existing?.video_urls || [],
     updated_at: new Date().toISOString(),
     created_at: cleanText(existing?.created_at || new Date().toISOString()),
   };
@@ -961,25 +996,87 @@ export function createCatalogAdmin(options = {}) {
     if (!META_ACCESS_TOKEN) throw new Error("Falta META_ACCESS_TOKEN");
     if (!META_CATALOG_ID) throw new Error("Falta META_CATALOG_ID");
 
+    const baseUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
+    const headers = { Authorization: `Bearer ${META_ACCESS_TOKEN}` };
+    const fieldAttempts = [
+      "id,retailer_id,name,description,price,currency,url,image_url,availability,additional_image_urls",
+      "id,retailer_id,name,description,price,currency,url,image_url,availability",
+    ];
+
+    async function fetchProductDetails(productId) {
+      if (!productId) return null;
+      for (const fields of fieldAttempts) {
+        const res = await axios.get(`${baseUrl}/${productId}`, {
+          headers,
+          params: { fields },
+          timeout: 30000,
+          validateStatus: () => true,
+        });
+        if (res.status >= 200 && res.status < 300) return res.data || null;
+      }
+      return null;
+    }
+
     const items = [];
     let after = "";
     let pageCount = 0;
+    let successfulFields = fieldAttempts[0];
+
     while (pageCount < 25) {
       pageCount += 1;
-      const res = await axios.get(`https://graph.facebook.com/${META_GRAPH_VERSION}/${META_CATALOG_ID}/products`, {
-        headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}` },
-        params: { fields: "id,retailer_id,name,description,price,currency,url,image_url,availability", limit: 100, ...(after ? { after } : {}) },
-        timeout: 30000,
-        validateStatus: () => true,
-      });
-      if (res.status < 200 || res.status >= 300) throw new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
-      const pageItems = Array.isArray(res.data?.data) ? res.data.data : [];
+      let response = null;
+      let lastError = null;
+
+      for (const fields of fieldAttempts) {
+        const res = await axios.get(`${baseUrl}/${META_CATALOG_ID}/products`, {
+          headers,
+          params: { fields, limit: 100, ...(after ? { after } : {}) },
+          timeout: 30000,
+          validateStatus: () => true,
+        });
+        if (res.status >= 200 && res.status < 300) {
+          response = res;
+          successfulFields = fields;
+          break;
+        }
+        lastError = new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
+      }
+
+      if (!response) throw lastError || new Error("No se pudo leer el catálogo de Meta");
+
+      const pageItems = Array.isArray(response.data?.data) ? response.data.data : [];
       items.push(...pageItems);
-      const nextAfter = cleanText(res.data?.paging?.cursors?.after || "");
+      const nextAfter = cleanText(response.data?.paging?.cursors?.after || "");
       if (!nextAfter || !pageItems.length) break;
       after = nextAfter;
     }
-    return items;
+
+    const shouldEnrich = !successfulFields.includes("additional_image_urls") || items.some((item) => !normalizeMetaUrlArray(item?.additional_image_urls).length);
+    if (!shouldEnrich) {
+      return items.map((item) => ({
+        ...item,
+        additional_image_urls: uniqueUrlList(item?.additional_image_urls).filter((url) => cleanText(url) !== cleanText(item?.image_url || "")),
+      }));
+    }
+
+    const enriched = [];
+    for (const item of items) {
+      const details = await fetchProductDetails(item?.id);
+      const merged = {
+        ...(item || {}),
+        ...(details || {}),
+      };
+      merged.additional_image_urls = uniqueUrlList(
+        merged?.additional_image_urls,
+        item?.additional_image_urls,
+        details?.additional_image_urls,
+        details?.additional_image_cdn_urls,
+        merged?.image_url ? [merged.image_url] : []
+      ).filter((url) => cleanText(url) !== cleanText(merged?.image_url || ""));
+      enriched.push(merged);
+    }
+
+    return enriched;
   }
 
   async function importMetaCatalogIntoPanel() {
@@ -995,7 +1092,8 @@ export function createCatalogAdmin(options = {}) {
     const updatedCount = importedCount - createdCount;
     syncState.lastMetaImportAt = new Date().toISOString();
     syncState.lastMetaImportOk = true;
-    syncState.lastMetaImportMessage = `Meta importado: ${importedCount} leídas, ${createdCount} nuevas, ${updatedCount} actualizadas.`;
+    const withMediaCount = imported.filter((item) => Array.isArray(item.image_urls) && item.image_urls.length).length;
+    syncState.lastMetaImportMessage = `Meta importado: ${importedCount} leídas, ${createdCount} nuevas, ${updatedCount} actualizadas, ${withMediaCount} con galería.`;
     return { ok: true, items: store.properties, importedCount, createdCount, updatedCount, message: syncState.lastMetaImportMessage };
   }
 
