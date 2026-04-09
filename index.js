@@ -3,6 +3,7 @@ import axios from "axios";
 import crypto from "crypto";
 import { google } from "googleapis";
 import Redis from "ioredis";
+import { createCatalogAdmin } from "./catalog-admin/router.js";
 
 // =========================
 // Helpers base
@@ -494,35 +495,34 @@ function normalizeOperationKey(operation) {
   return "";
 }
 
-const PROPERTY_CATALOG = (safeJson(process.env.PROPERTY_CATALOG_JSON, []) || [])
-  .map(normalizeProperty)
-  .filter((p) => p.active);
-
-console.log("TOTAL PROPERTY_CATALOG:", PROPERTY_CATALOG.length);
-console.log(
-  "CASAS:",
-  PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "casas").length
-);
-console.log(
-  "LOCALES:",
-  PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "locales_comerciales").length
-);
-console.log(
-  "VENTA:",
-  PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "venta").length
-);
-console.log(
-  "ALQUILER:",
-  PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "alquiler").length
-);
-
+let PROPERTY_CATALOG = [];
 const PROPERTY_CATEGORIES_BY_ID = Object.fromEntries(PROPERTY_CATEGORIES.map((c) => [c.id, c]));
 const PROPERTY_CATEGORIES_BY_KEY = Object.fromEntries(PROPERTY_CATEGORIES.map((c) => [c.key, c]));
+let PROPERTY_BY_ID = {};
+let PROPERTY_BY_RETAILER_ID = {};
+let PROPERTY_BY_CODE = {};
+let PROPERTY_BY_TITLE = {};
+let PROPERTY_GROUPS = {};
 
-const PROPERTY_BY_ID = Object.fromEntries(PROPERTY_CATALOG.map((p) => [p.id, p]));
-const PROPERTY_BY_RETAILER_ID = Object.fromEntries(PROPERTY_CATALOG.map((p) => [p.retailer_id, p]));
-const PROPERTY_BY_CODE = Object.fromEntries(PROPERTY_CATALOG.map((p) => [normalizeText(p.code), p]));
-const PROPERTY_BY_TITLE = Object.fromEntries(PROPERTY_CATALOG.map((p) => [normalizeText(p.title), p]));
+function logPropertyCatalogStats() {
+  console.log("TOTAL PROPERTY_CATALOG:", PROPERTY_CATALOG.length);
+  console.log(
+    "CASAS:",
+    PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "casas").length
+  );
+  console.log(
+    "LOCALES:",
+    PROPERTY_CATALOG.filter((p) => normalizeText(p.category) === "locales_comerciales").length
+  );
+  console.log(
+    "VENTA:",
+    PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "venta").length
+  );
+  console.log(
+    "ALQUILER:",
+    PROPERTY_CATALOG.filter((p) => normalizeOperationKey(p.operation || p.category || "") === "alquiler").length
+  );
+}
 
 function groupPropertiesByCategory(properties) {
   const grouped = {};
@@ -534,7 +534,19 @@ function groupPropertiesByCategory(properties) {
   return grouped;
 }
 
-const PROPERTY_GROUPS = groupPropertiesByCategory(PROPERTY_CATALOG);
+function refreshPropertyCatalog(nextCatalog = []) {
+  const source = Array.isArray(nextCatalog) ? nextCatalog : [];
+  PROPERTY_CATALOG = source.map(normalizeProperty).filter((p) => p.active);
+  PROPERTY_BY_ID = Object.fromEntries(PROPERTY_CATALOG.map((p) => [p.id, p]));
+  PROPERTY_BY_RETAILER_ID = Object.fromEntries(PROPERTY_CATALOG.map((p) => [p.retailer_id, p]));
+  PROPERTY_BY_CODE = Object.fromEntries(PROPERTY_CATALOG.map((p) => [normalizeText(p.code), p]));
+  PROPERTY_BY_TITLE = Object.fromEntries(PROPERTY_CATALOG.map((p) => [normalizeText(p.title), p]));
+  PROPERTY_GROUPS = groupPropertiesByCategory(PROPERTY_CATALOG);
+  logPropertyCatalogStats();
+  return PROPERTY_CATALOG;
+}
+
+refreshPropertyCatalog(safeJson(process.env.PROPERTY_CATALOG_JSON, []) || []);
 
 function getPropertiesForMenuCategory(categoryKey) {
   const normalizedInput = normalizeText(categoryKey || "");
@@ -643,6 +655,7 @@ function sanitizeSession(session) {
     session.aiProfile = {
       ...defaultSession().aiProfile,
       ...session.aiProfile,
+      budget_min: Number.isFinite(Number(session.aiProfile?.budget_min)) ? Number(session.aiProfile.budget_min) : null,
       budget_min: Number.isFinite(Number(session.aiProfile?.budget_min)) ? Number(session.aiProfile.budget_min) : null,
       budget_max: Number.isFinite(Number(session.aiProfile?.budget_max)) ? Number(session.aiProfile.budget_max) : null,
       bedrooms: Number.isFinite(Number(session.aiProfile?.bedrooms)) ? Number(session.aiProfile.bedrooms) : null,
@@ -986,6 +999,19 @@ app.use(
     },
   })
 );
+
+const catalogAdmin = createCatalogAdmin({
+  basePath: "/admin",
+  businessName: BUSINESS_NAME,
+  adminUsername: process.env.ADMIN_PANEL_USERNAME || "admin",
+  adminPassword: process.env.ADMIN_PANEL_PASSWORD || "admin123456",
+  getCatalog: () => PROPERTY_CATALOG.map((p) => ({ ...p, product_retailer_id: p.retailer_id })),
+  setCatalog: async (nextCatalog) => {
+    refreshPropertyCatalog(nextCatalog || []);
+  },
+});
+
+app.use("/admin", catalogAdmin.router);
 
 function verifyMetaSignature(req) {
   if (!META_APP_SECRET) return true;
@@ -1490,7 +1516,6 @@ function mergeLeadProfile(base = {}, extra = {}) {
   }
   if (!Number.isFinite(Number(next.budget_min))) next.budget_min = null;
   else next.budget_min = Number(next.budget_min);
-
   if (!Number.isFinite(Number(next.budget_max))) next.budget_max = null;
   else next.budget_max = Number(next.budget_max);
 
@@ -4350,4 +4375,14 @@ app.get("/tick", async (_req, res) => {
   return res.status(200).send("tick ok");
 });
 
-app.listen(PORT, () => console.log(`Bot running on :${PORT}`));
+async function startServer() {
+  try {
+    await catalogAdmin.init();
+  } catch (e) {
+    console.error("Catalog admin init error:", e?.message || e);
+  }
+
+  app.listen(PORT, () => console.log(`Bot running on :${PORT}`));
+}
+
+startServer();
