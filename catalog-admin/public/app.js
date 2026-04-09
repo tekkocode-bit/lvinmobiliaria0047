@@ -4,9 +4,8 @@ const API_BASE = `${ADMIN_BASE}/api`;
 const state = {
   authenticated: false,
   username: null,
-  loading: false,
   properties: [],
-  stats: { total: 0, active: 0, alquiler: 0, venta: 0, metaReady: 0 },
+  stats: { total: 0, active: 0, alquiler: 0, venta: 0, withMedia: 0, metaReady: 0 },
   config: null,
   filters: { q: "", category: "", operation: "", active: "" },
   selectedId: null,
@@ -36,6 +35,7 @@ const defaultForm = {
   construction_m2: "",
   short_description: "",
   features: "",
+  requirements_text: "",
   year_built: "",
   condition: "",
   title_deed: "",
@@ -62,12 +62,17 @@ const defaultForm = {
   active: true,
   agent_name: "",
   agent_phone: "",
+  raw_post_text: "",
+  cloudinary_folder: "",
+  image_urls: "",
+  video_urls: "",
+  primary_image_url: "",
   meta_url: "",
   meta_image_url: "",
   meta_availability: "in stock",
 };
 
-const app = document.getElementById("app");
+const appRoot = document.getElementById("app");
 const toastLayer = document.createElement("div");
 toastLayer.className = "toast-layer";
 document.body.appendChild(toastLayer);
@@ -82,15 +87,15 @@ function escapeHtml(value) {
 }
 
 function showToast(message, type = "info") {
-  const el = document.createElement("div");
-  el.className = `toast ${type}`;
-  el.textContent = message;
-  toastLayer.appendChild(el);
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  toastLayer.appendChild(toast);
   setTimeout(() => {
-    el.style.opacity = "0";
-    el.style.transform = "translateY(-6px)";
-    el.style.transition = "0.25s ease";
-    setTimeout(() => el.remove(), 250);
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(-4px)";
+    toast.style.transition = "0.25s ease";
+    setTimeout(() => toast.remove(), 250);
   }, 3500);
 }
 
@@ -106,7 +111,7 @@ async function api(url, options = {}) {
   const res = await fetch(finalUrl, {
     credentials: "same-origin",
     headers: {
-      "Content-Type": "application/json",
+      ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers || {}),
     },
     ...options,
@@ -115,10 +120,17 @@ async function api(url, options = {}) {
   const contentType = res.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) {
-    const message = typeof data === "string" ? data : data?.error || data?.errors?.join("\n") || "Ocurrió un error";
-    throw new Error(message);
+    throw new Error(typeof data === "string" ? data : data?.error || data?.errors?.join("\n") || "Ocurrió un error");
   }
   return data;
+}
+
+function parseList(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return String(value || "")
+    .split(/[\n,|]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function propertyToForm(property) {
@@ -126,19 +138,48 @@ function propertyToForm(property) {
   return {
     ...defaultForm,
     ...property,
-    features: Array.isArray(property.features) ? property.features.join("\n") : "",
-    nearby_places: Array.isArray(property.nearby_places) ? property.nearby_places.join("\n") : "",
+    features: Array.isArray(property.features) ? property.features.join("\n") : property.features || "",
+    nearby_places: Array.isArray(property.nearby_places) ? property.nearby_places.join("\n") : property.nearby_places || "",
+    image_urls: Array.isArray(property.image_urls) ? property.image_urls.join("\n") : property.image_urls || "",
+    video_urls: Array.isArray(property.video_urls) ? property.video_urls.join("\n") : property.video_urls || "",
   };
 }
 
-function findSelected() {
+function currentEditingForm() {
+  return state.editing ? { ...state.editing } : { ...defaultForm };
+}
+
+function getSelectedProperty() {
   return state.properties.find((item) => item.id === state.selectedId) || state.properties[0] || null;
 }
 
-function render() {
-  document.body.classList.toggle("modal-open", !!state.editing || state.importOpen);
-  app.innerHTML = state.authenticated ? renderDashboard() : renderLogin();
-  bindEvents();
+function getMediaGallery(property) {
+  const imageUrls = parseList(property?.image_urls || []);
+  const videoUrls = parseList(property?.video_urls || []);
+  const primary = String(property?.primary_image_url || property?.meta_image_url || imageUrls[0] || "").trim();
+  return [
+    ...imageUrls.map((url) => ({ url, type: "image", primary: url === primary || (!primary && imageUrls[0] === url) })),
+    ...videoUrls.map((url) => ({ url, type: "video", primary: false })),
+  ];
+}
+
+function buildMetaPreview(property) {
+  const imageUrls = parseList(property?.image_urls || []);
+  const primary = String(property?.meta_image_url || property?.primary_image_url || imageUrls[0] || "").trim();
+  const additional = imageUrls.filter((url) => url && url !== primary);
+  return {
+    retailer_id: property?.retailer_id || property?.code || property?.id || "",
+    name: `${String(property?.operation || "venta").toLowerCase() === "alquiler" ? "ALQUILER" : "VENTA"} | ${property?.title || property?.code || property?.id || ""}`,
+    price: String(property?.price || "").replace(/[^\d]/g, ""),
+    currency: property?.currency || "DOP",
+    url: property?.meta_url || "",
+    image_url: primary,
+    additional_image_urls: additional,
+  };
+}
+
+function badgeClass(operation) {
+  return operation === "alquiler" ? "alquiler" : operation === "venta" ? "venta" : "neutral";
 }
 
 function renderLogin() {
@@ -148,22 +189,21 @@ function renderLogin() {
         <div class="brand-row">
           <div class="brand-badge">LV</div>
           <div class="brand-copy">
-            <h1>Panel Admin</h1>
-            <p>Panel visual para gestionar propiedades, sincronizar con el bot y actualizar Meta.</p>
+            <h1>${escapeHtml(window.ADMIN_BUSINESS_NAME || "LV Inmobiliaria")}</h1>
+            <p>Panel visual para administrar propiedades, pegar publicaciones, manejar galería Cloudinary y sincronizar bot + Meta.</p>
           </div>
         </div>
-        <form id="login-form" class="form-grid">
+        <form id="login-form" class="form-grid" style="grid-template-columns:1fr">
           <label class="label">Usuario
-            <input class="input" name="username" placeholder="admin" autocomplete="username" />
+            <input class="input" name="username" autocomplete="username" placeholder="admin" />
           </label>
           <label class="label">Contraseña
-            <input class="input" type="password" name="password" placeholder="••••••••" autocomplete="current-password" />
+            <input class="input" name="password" type="password" autocomplete="current-password" placeholder="••••••••" />
           </label>
           <div class="button-row">
             <button class="btn btn-primary" type="submit">Entrar al panel</button>
           </div>
-          <div class="info-box">Este panel funciona dentro del mismo servicio del bot, con vista oscura, compacta y sincronización centralizada.</div>
-          <p class="login-hint">Usa credenciales seguras antes de ponerlo en producción.</p>
+          <div class="info-box">Puedes crear propiedades rápido pegando el texto completo de la publicación y luego añadir los links de Cloudinary en bloque.</div>
         </form>
       </div>
     </div>
@@ -178,20 +218,20 @@ function renderRows() {
   if (!state.properties.length) {
     return `<tr><td colspan="8"><div class="empty-state">No hay propiedades cargadas todavía.</div></td></tr>`;
   }
-  return state.properties
-    .map((item) => {
-      const selected = item.id === state.selectedId ? 'style="background: rgba(255,138,28,0.08);"' : "";
-      return `
-      <tr ${selected} data-select-id="${escapeHtml(item.id)}">
+
+  return state.properties.map((item) => {
+    const selected = item.id === state.selectedId ? "is-selected" : "";
+    const image = item.primary_image_url || item.meta_image_url || parseList(item.image_urls || [])[0] || "";
+    return `
+      <tr class="${selected}" data-select-id="${escapeHtml(item.id)}">
         <td>
-          <strong>${escapeHtml(item.title || item.code)}</strong>
-          <small>${escapeHtml(item.id)}</small>
+          ${image ? `<div style="display:flex;gap:12px;align-items:center"><img src="${escapeHtml(image)}" alt="" style="width:64px;height:50px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,0.08)" /><div><strong>${escapeHtml(item.title || item.code)}</strong><small>${escapeHtml(item.id)}</small></div></div>` : `<strong>${escapeHtml(item.title || item.code)}</strong><small>${escapeHtml(item.id)}</small>`}
         </td>
-        <td><span class="badge ${escapeHtml(item.operation || "neutral")}">${escapeHtml(item.operation || "-")}</span></td>
+        <td><span class="badge ${badgeClass(item.operation)}">${escapeHtml(item.operation || "-")}</span></td>
         <td>${escapeHtml(item.category || "-")}</td>
         <td>${escapeHtml(item.location || "-")}</td>
         <td>${escapeHtml(item.price || "-")} ${escapeHtml(item.currency || "")}</td>
-        <td>${escapeHtml(item.agent_name || "-")}</td>
+        <td>${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</td>
         <td><span class="badge ${item.active ? "active" : "inactive"}">${item.active ? "Activa" : "Inactiva"}</span></td>
         <td>
           <div class="button-row">
@@ -199,56 +239,81 @@ function renderRows() {
             <button class="btn btn-danger btn-small" data-delete-id="${escapeHtml(item.id)}">Eliminar</button>
           </div>
         </td>
-      </tr>`;
-    })
-    .join("");
+      </tr>
+    `;
+  }).join("");
 }
 
-function renderPreviewPanel() {
-  const selected = findSelected();
+function renderSelectedDetail() {
+  const selected = getSelectedProperty();
   if (!selected) {
-    return `<div class="preview-panel"><div class="empty-state">Selecciona una propiedad para ver el detalle.</div></div>`;
+    return `<div class="detail-panel"><div class="empty-state">Selecciona una propiedad para ver el detalle.</div></div>`;
   }
 
-  const meta = {
-    retailer_id: selected.retailer_id || selected.code || selected.id,
-    name: `${selected.operation === "alquiler" ? "ALQUILER" : "VENTA"} | ${selected.title || selected.code}`,
-    price: String(selected.price || "").replace(/[^\d]/g, ""),
-    currency: selected.currency || "DOP",
-    url: selected.meta_url || "",
-    image_url: selected.meta_image_url || "",
-  };
+  const gallery = getMediaGallery(selected);
+  const image = selected.primary_image_url || selected.meta_image_url || gallery.find((item) => item.type === "image")?.url || "";
+  const metaPreview = buildMetaPreview(selected);
 
   return `
-    <div class="preview-panel">
-      <div class="section-head">
-        <div>
-          <h3>${escapeHtml(selected.title || selected.code)}</h3>
-          <p class="muted">${escapeHtml(selected.location || "Sin ubicación")}</p>
+    <div class="detail-grid">
+      <div class="detail-panel">
+        ${image ? `<div class="preview-photo"><img src="${escapeHtml(image)}" alt="${escapeHtml(selected.title || "")}" /></div>` : `<div class="preview-photo" style="display:grid;place-items:center;color:var(--muted)">Sin portada</div>`}
+        <div class="section-head">
+          <div>
+            <h3>${escapeHtml(selected.title || selected.code)}</h3>
+            <p>${escapeHtml(selected.location || "Sin ubicación")}</p>
+          </div>
+          <span class="badge ${selected.active ? "active" : "inactive"}">${selected.active ? "Activa" : "Inactiva"}</span>
         </div>
-        <span class="badge ${selected.active ? "active" : "inactive"}">${selected.active ? "Activa" : "Inactiva"}</span>
+        <div class="media-summary-grid">
+          <div class="card-panel"><small class="muted">Código</small><strong>${escapeHtml(selected.code || "-")}</strong></div>
+          <div class="card-panel"><small class="muted">Precio</small><strong>${escapeHtml(selected.price || "-")} ${escapeHtml(selected.currency || "")}</strong></div>
+          <div class="card-panel"><small class="muted">Habitaciones / baños</small><strong>${escapeHtml(selected.bedrooms || "-")} / ${escapeHtml(selected.bathrooms || "-")}</strong></div>
+        </div>
+        <div class="meta-list" style="margin-top:14px">
+          <div class="meta-item">
+            <strong>Descripción corta</strong>
+            <div class="muted">${escapeHtml(selected.short_description || "Sin descripción")}</div>
+          </div>
+          <div class="meta-item">
+            <strong>Características</strong>
+            <div class="feature-list">
+              ${(Array.isArray(selected.features) ? selected.features : []).length ? (selected.features || []).map((feature) => `<span class="feature-pill">${escapeHtml(feature)}</span>`).join("") : `<span class="muted">Sin características registradas</span>`}
+            </div>
+          </div>
+          ${selected.requirements_text ? `<div class="meta-item"><strong>Requisitos</strong><pre class="raw-preview">${escapeHtml(selected.requirements_text)}</pre></div>` : ""}
+        </div>
       </div>
-      <div class="meta-list">
+      <div class="detail-panel">
         <div class="meta-item">
-          <strong>Resumen rápido</strong>
-          <div class="muted">${escapeHtml(selected.short_description || "Sin descripción")}</div>
-        </div>
-        <div class="meta-item">
-          <strong>IDs sincronizados</strong>
-          <div><code>id:</code> ${escapeHtml(selected.id)}</div>
-          <div><code>retailer_id:</code> ${escapeHtml(selected.retailer_id)}</div>
-          <div><code>code:</code> ${escapeHtml(selected.code)}</div>
+          <strong>Sincronización e IDs</strong>
+          <div><code>id</code>: ${escapeHtml(selected.id)}</div>
+          <div><code>retailer_id</code>: ${escapeHtml(selected.retailer_id)}</div>
+          <div><code>code</code>: ${escapeHtml(selected.code)}</div>
         </div>
         <div class="meta-item">
           <strong>Preview para Meta</strong>
-          <pre>${escapeHtml(JSON.stringify(meta, null, 2))}</pre>
+          <pre class="json-preview">${escapeHtml(JSON.stringify(metaPreview, null, 2))}</pre>
+        </div>
+        <div class="meta-item">
+          <strong>Galería</strong>
+          ${gallery.length ? `<div class="gallery-grid">${gallery.map((item, index) => `
+            <div class="gallery-card">
+              <div class="gallery-thumb">${item.type === "video" ? `<video src="${escapeHtml(item.url)}" controls playsinline></video>` : `<img src="${escapeHtml(item.url)}" alt="media ${index + 1}" />`}</div>
+              <div class="gallery-card-body">
+                <small>${item.type === "video" ? "Video" : item.primary ? "Portada" : "Imagen adicional"}</small>
+                <a class="btn btn-ghost btn-small" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Abrir</a>
+              </div>
+            </div>
+          `).join("")}</div>` : `<div class="empty-state">Sin fotos ni videos todavía.</div>`}
         </div>
       </div>
     </div>
   `;
 }
 
-function syncCard(title, description, ready, statusMessage, statusOk, buttonLabel, action) {
+function syncCard(title, description, ready, message, ok, action) {
+  const buttonLabel = action === "bot" ? "Sincronizar bot" : action === "meta" ? "Sincronizar Meta" : action === "all" ? "Sincronizar todo" : "Importar desde Meta";
   return `
     <div class="sync-card">
       <div class="section-head">
@@ -258,19 +323,18 @@ function syncCard(title, description, ready, statusMessage, statusOk, buttonLabe
         </div>
         <span class="badge ${ready ? "active" : "inactive"}">${ready ? "Configurado" : "Pendiente"}</span>
       </div>
-      <div class="info-box">${escapeHtml(statusMessage || "Sin actividad")}</div>
+      <div class="info-box">${escapeHtml(message || "Sin actividad")}</div>
       <div class="button-row">
-        <button class="btn ${ready ? "btn-primary" : "btn-secondary"}" ${ready ? "" : "disabled"} data-sync-action="${escapeHtml(action)}">${escapeHtml(buttonLabel)}</button>
+        <button class="btn ${ready ? "btn-primary" : "btn-secondary"}" data-sync-action="${escapeHtml(action)}" ${ready ? "" : "disabled"}>${escapeHtml(buttonLabel)}</button>
       </div>
-      ${statusOk === false ? `<div class="error-box">Último resultado con error.</div>` : statusOk === true ? `<div class="success-box">Última ejecución correcta.</div>` : ""}
+      ${ok === true ? `<div class="success-box">Última ejecución correcta.</div>` : ok === false ? `<div class="error-box">Último resultado con error.</div>` : ""}
     </div>
   `;
 }
 
 function renderDashboard() {
-  const selected = findSelected();
-  const config = state.config || { integrations: {}, syncState: {} };
-  const syncState = config.syncState || {};
+  const integrations = state.config?.integrations || {};
+  const syncState = state.config?.syncState || {};
 
   return `
     <div class="dashboard-shell">
@@ -278,7 +342,7 @@ function renderDashboard() {
         <div class="brand-row">
           <div class="brand-badge">LV</div>
           <div class="brand-copy">
-            <h2>${escapeHtml(config.businessName || "LV Inmobiliaria")}</h2>
+            <h2>${escapeHtml(window.ADMIN_BUSINESS_NAME || "LV Inmobiliaria")}</h2>
             <p>Panel Admin</p>
           </div>
         </div>
@@ -287,81 +351,36 @@ function renderDashboard() {
           <div class="nav-chip">Sincronización</div>
           <div class="nav-chip">Vista previa Meta</div>
         </div>
-        <div class="info-box">
-          <strong>Usuario:</strong> ${escapeHtml(state.username || "-")}
-          <br />
-          <strong>Bot env:</strong> ${escapeHtml(config.integrations?.renderBotEnvKey || "PROPERTY_CATALOG_JSON")}
+        <div class="info-stack">
+          <div class="info-box">
+            <div><strong>Usuario:</strong> ${escapeHtml(state.username || "-")}</div>
+            <div><strong>Bot env:</strong> ${escapeHtml(integrations.renderBotEnvKey || "PROPERTY_CATALOG_JSON")}</div>
+          </div>
+          <div class="info-box">Pega la publicación completa, deja que el panel autocompletar y luego añade los links de Cloudinary en bloque.</div>
         </div>
         <div class="button-row">
           <button class="btn btn-ghost" id="logout-btn">Cerrar sesión</button>
         </div>
       </aside>
-
       <main class="main">
         <section class="topbar">
           <div class="topbar-row">
             <div>
-              <h1>Panel admin de propiedades</h1>
-              <p>Gestiona, edita y sincroniza el catálogo del bot y el catálogo de Meta desde un panel limpio, oscuro, compacto y funcional.</p>
+              <h1>Catálogo centralizado</h1>
+              <p>Administra el catálogo del bot y el catálogo de Meta desde un mismo panel.</p>
             </div>
             <div class="button-row">
               <button class="btn btn-secondary" id="import-btn">Importar JSON</button>
-              <button class="btn btn-secondary" id="import-meta-btn" ${config.integrations?.metaImportReady ? "" : "disabled"}>Importar desde Meta</button>
-              <a class="btn btn-secondary" href="${ADMIN_BASE}/api/properties/export">Exportar JSON</a>
+              <button class="btn btn-secondary" id="import-meta-btn" ${integrations.metaImportReady ? "" : "disabled"}>Cargar desde Meta</button>
               <button class="btn btn-primary" id="new-btn">Nueva propiedad</button>
             </div>
           </div>
           <div class="stats-grid">
-            ${statCard("Total", state.stats.total)}
-            ${statCard("Activas", state.stats.active)}
-            ${statCard("Alquiler", state.stats.alquiler)}
-            ${statCard("Venta", state.stats.venta)}
-          </div>
-        </section>
-
-        <section class="section-card">
-          <div class="section-head">
-            <div>
-              <h3>Listado principal</h3>
-              <p class="muted">Busca rápido, filtra por tipo y mantén los IDs alineados entre bot y Meta.</p>
-            </div>
-          </div>
-          <div class="toolbar">
-            <input class="input" id="filter-q" placeholder="Buscar por nombre, id, code, ubicación, agente..." value="${escapeHtml(state.filters.q)}" />
-            <select class="select" id="filter-category">
-              <option value="">Todas las categorías</option>
-              ${["apartamentos","casas","solares","proyectos","locales_comerciales","venta","alquiler"].map((opt) => `<option value="${opt}" ${state.filters.category === opt ? "selected" : ""}>${opt}</option>`).join("")}
-            </select>
-            <select class="select" id="filter-operation">
-              <option value="">Todas las operaciones</option>
-              <option value="venta" ${state.filters.operation === "venta" ? "selected" : ""}>venta</option>
-              <option value="alquiler" ${state.filters.operation === "alquiler" ? "selected" : ""}>alquiler</option>
-            </select>
-            <select class="select" id="filter-active">
-              <option value="">Todos los estados</option>
-              <option value="true" ${state.filters.active === "true" ? "selected" : ""}>Activas</option>
-              <option value="false" ${state.filters.active === "false" ? "selected" : ""}>Inactivas</option>
-            </select>
-          </div>
-          <div class="layout-2">
-            <div class="table-wrap">
-              <table class="table">
-                <thead>
-                  <tr>
-                    <th>Propiedad</th>
-                    <th>Operación</th>
-                    <th>Categoría</th>
-                    <th>Ubicación</th>
-                    <th>Precio</th>
-                    <th>Agente</th>
-                    <th>Estado</th>
-                    <th>Acciones</th>
-                  </tr>
-                </thead>
-                <tbody>${renderRows()}</tbody>
-              </table>
-            </div>
-            ${renderPreviewPanel()}
+            ${statCard("Total", state.stats.total || 0)}
+            ${statCard("Activas", state.stats.active || 0)}
+            ${statCard("Alquiler", state.stats.alquiler || 0)}
+            ${statCard("Venta", state.stats.venta || 0)}
+            ${statCard("Con media", state.stats.withMedia || 0)}
           </div>
         </section>
 
@@ -369,220 +388,293 @@ function renderDashboard() {
           <div class="section-head">
             <div>
               <h3>Sincronización centralizada</h3>
-              <p class="muted">Aplica cambios al bot y al catálogo de Meta desde este mismo panel.</p>
-            </div>
-            <div class="button-row">
-              <button class="btn btn-primary" ${config.integrations?.renderReady && config.integrations?.metaReady ? "" : "disabled"} data-sync-action="all">Sincronizar todo</button>
+              <p>Aplica cambios al bot y al catálogo de Meta desde este mismo panel.</p>
             </div>
           </div>
           <div class="sync-grid">
-            ${syncCard(
-              "Bot / Render",
-              "Actualiza PROPERTY_CATALOG_JSON y dispara deploy del bot.",
-              !!config.integrations?.renderReady,
-              syncState.lastBotSyncMessage,
-              syncState.lastBotSyncOk,
-              "Sincronizar bot",
-              "bot"
-            )}
-            ${syncCard(
-              "Meta → Panel",
-              "Lee las propiedades ya existentes en Meta y las carga aquí sin duplicarlas por retailer_id.",
-              !!config.integrations?.metaImportReady,
-              syncState.lastMetaImportMessage,
-              syncState.lastMetaImportOk,
-              "Importar desde Meta",
-              "meta-import"
-            )}
-            ${syncCard(
-              "Meta Catalog",
-              "Empuja los productos del panel al catálogo usando catalog_management.",
-              !!config.integrations?.metaReady,
-              syncState.lastMetaSyncMessage,
-              syncState.lastMetaSyncOk,
-              "Sincronizar Meta",
-              "meta"
-            )}
+            ${syncCard("Bot / Render", "Actualiza PROPERTY_CATALOG_JSON y deja el bot alineado con el panel.", true, syncState.lastBotSyncMessage, syncState.lastBotSyncOk, "bot")}
+            ${syncCard("Meta Catalog", "Empuja la portada + imágenes extra compatibles con Meta.", integrations.metaReady, syncState.lastMetaSyncMessage, syncState.lastMetaSyncOk, "meta")}
+            ${syncCard("Importar desde Meta", "Trae al panel lo que ya existe en el catálogo de Meta.", integrations.metaImportReady, syncState.lastMetaImportMessage, syncState.lastMetaImportOk, "meta-import")}
+          </div>
+          <div class="button-row" style="margin-top:14px">
+            <button class="btn btn-primary" data-sync-action="all">Sincronizar todo</button>
           </div>
         </section>
 
         <section class="section-card">
           <div class="section-head">
             <div>
-              <h3>Vista previa técnica</h3>
-              <p class="muted">Ideal para revisar payloads antes de publicar.</p>
+              <h3>Propiedades</h3>
+              <p>Busca, filtra, edita y abre la vista previa técnica.</p>
             </div>
-            ${selected ? `<button class="btn btn-secondary" data-preview-id="${escapeHtml(selected.id)}">Actualizar preview Meta</button>` : ""}
           </div>
-          <div id="meta-preview-slot">${selected ? `<div class="preview-panel"><pre>${escapeHtml(JSON.stringify(selected, null, 2))}</pre></div>` : `<div class="empty-state">No hay propiedad seleccionada.</div>`}</div>
+          <div class="form-grid-3" style="margin-bottom:12px">
+            <label class="label">Buscar
+              <input class="input" id="filter-q" value="${escapeHtml(state.filters.q)}" placeholder="nombre, código, ubicación o texto" />
+            </label>
+            <label class="label">Categoría
+              <select class="select" id="filter-category">
+                <option value="">Todas</option>
+                <option value="apartamentos" ${state.filters.category === "apartamentos" ? "selected" : ""}>Apartamentos</option>
+                <option value="casas" ${state.filters.category === "casas" ? "selected" : ""}>Casas</option>
+                <option value="solares" ${state.filters.category === "solares" ? "selected" : ""}>Solares</option>
+                <option value="proyectos" ${state.filters.category === "proyectos" ? "selected" : ""}>Proyectos</option>
+                <option value="locales_comerciales" ${state.filters.category === "locales_comerciales" ? "selected" : ""}>Locales comerciales</option>
+              </select>
+            </label>
+            <label class="label">Operación
+              <select class="select" id="filter-operation">
+                <option value="">Todas</option>
+                <option value="venta" ${state.filters.operation === "venta" ? "selected" : ""}>Venta</option>
+                <option value="alquiler" ${state.filters.operation === "alquiler" ? "selected" : ""}>Alquiler</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Propiedad</th>
+                  <th>Operación</th>
+                  <th>Categoría</th>
+                  <th>Ubicación</th>
+                  <th>Precio</th>
+                  <th>Media</th>
+                  <th>Estado</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>${renderRows()}</tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-head">
+            <div>
+              <h3>Detalle y vista previa</h3>
+              <p>Revisa la ficha, la galería y el payload que saldrá para Meta.</p>
+            </div>
+          </div>
+          ${renderSelectedDetail()}
         </section>
       </main>
-
       ${renderPropertyModal()}
       ${renderImportModal()}
     </div>
   `;
 }
 
-function renderField(name, label, value, type = "text", className = "") {
-  return `
-    <label class="label ${className}">${escapeHtml(label)}
-      <input class="input" name="${escapeHtml(name)}" type="${escapeHtml(type)}" value="${escapeHtml(value ?? "")}" />
-    </label>
-  `;
-}
-
-function renderTextArea(name, label, value, className = "") {
-  return `
-    <label class="label ${className}">${escapeHtml(label)}
-      <textarea class="textarea" name="${escapeHtml(name)}">${escapeHtml(value ?? "")}</textarea>
-    </label>
-  `;
-}
-
-function renderSelect(name, label, value, options, className = "") {
-  return `
-    <label class="label ${className}">${escapeHtml(label)}
-      <select class="select" name="${escapeHtml(name)}">
-        ${options.map((opt) => `<option value="${escapeHtml(opt.value)}" ${String(value) === String(opt.value) ? "selected" : ""}>${escapeHtml(opt.label)}</option>`).join("")}
-      </select>
-    </label>
-  `;
+function renderMediaPreview(form) {
+  const gallery = getMediaGallery(form);
+  if (!gallery.length) return `<div class="empty-state">Pega aquí los links de Cloudinary de fotos o videos. Uno por línea.</div>`;
+  return `<div class="gallery-grid">${gallery.map((item, index) => `
+    <div class="gallery-card">
+      <div class="gallery-thumb">${item.type === "video" ? `<video src="${escapeHtml(item.url)}" controls playsinline></video>` : `<img src="${escapeHtml(item.url)}" alt="${escapeHtml(form.title || "media")}" />`}</div>
+      <div class="gallery-card-body">
+        <small>${item.type === "video" ? "Video" : item.primary ? "Portada" : "Imagen extra"}</small>
+        ${item.type === "image" ? `<button type="button" class="btn btn-secondary btn-small" data-set-primary="${escapeHtml(item.url)}">Usar como portada</button>` : `<span class="muted">No se usa como portada</span>`}
+      </div>
+    </div>
+  `).join("")}</div>`;
 }
 
 function renderPropertyModal() {
   if (!state.editing) return `<div class="modal-backdrop" id="property-modal"></div>`;
   const form = state.editing;
+  const preview = buildMetaPreview(form);
   return `
     <div class="modal-backdrop open" id="property-modal">
       <div class="modal">
         <div class="modal-head">
           <div class="modal-title">
             <div>
-              <h2>${form.__mode === "create" ? "Nueva propiedad" : "Editar propiedad"}</h2>
-              <p class="muted">No se toca el bot. Este panel administra el catálogo aparte y lo sincroniza cuando tú lo decidas.</p>
+              <h2>${form.__mode === "edit" ? "Editar propiedad" : "Nueva propiedad"}</h2>
+              <p class="muted">Pega la publicación completa y deja que el panel autocompletar lo más pesado.</p>
             </div>
-            <button class="btn btn-ghost" id="close-modal-btn">Cerrar</button>
+            <button class="btn btn-ghost" type="button" id="close-modal-btn">Cerrar</button>
           </div>
         </div>
         <form id="property-form">
           <div class="modal-body">
-            <section class="form-sections">
-              <div class="section-card">
-                <div class="section-head"><h3>Base</h3></div>
-                <div class="field-grid">
-                  ${renderField("id", "ID interno", form.id)}
-                  ${renderField("retailer_id", "retailer_id / Meta ID", form.retailer_id)}
-                  ${renderField("code", "Código", form.code)}
-                  ${renderField("title", "Título", form.title, "text", "span-2")}
-                  ${renderSelect("category", "Categoría", form.category, [
-                    { value: "apartamentos", label: "apartamentos" },
-                    { value: "casas", label: "casas" },
-                    { value: "solares", label: "solares" },
-                    { value: "proyectos", label: "proyectos" },
-                    { value: "locales_comerciales", label: "locales_comerciales" },
-                  ])}
-                  ${renderSelect("operation", "Operación", form.operation, [
-                    { value: "venta", label: "venta" },
-                    { value: "alquiler", label: "alquiler" },
-                  ])}
-                  ${renderField("price", "Precio", form.price)}
-                  ${renderField("currency", "Moneda", form.currency)}
-                  ${renderField("location", "Ubicación", form.location, "text", "span-2")}
-                  ${renderField("exact_address", "Dirección exacta", form.exact_address, "text", "span-2")}
-                  ${renderField("exact_location_reference", "Referencia de ubicación", form.exact_location_reference, "text", "span-2")}
-                </div>
-              </div>
-
-              <div class="section-card">
-                <div class="section-head"><h3>Características</h3></div>
-                <div class="field-grid">
-                  ${renderField("bedrooms", "Habitaciones", form.bedrooms, "number")}
-                  ${renderField("bathrooms", "Baños", form.bathrooms, "number")}
-                  ${renderField("parking", "Parqueos", form.parking, "number")}
-                  ${renderField("floor_level", "Nivel / piso", form.floor_level)}
-                  ${renderField("area_m2", "Área m²", form.area_m2, "number")}
-                  ${renderField("lot_m2", "Solar m²", form.lot_m2, "number")}
-                  ${renderField("construction_m2", "Construcción m²", form.construction_m2, "number")}
-                  ${renderField("duration_min", "Duración visita (min)", form.duration_min, "number")}
-                  ${renderTextArea("short_description", "Descripción corta", form.short_description, "span-4")}
-                  ${renderTextArea("features", "Features / amenidades (una por línea)", form.features, "span-2")}
-                  ${renderTextArea("nearby_places", "Lugares cercanos (uno por línea)", form.nearby_places, "span-2")}
-                </div>
-              </div>
-
-              <div class="section-card">
-                <div class="section-head"><h3>Legal y servicios</h3></div>
-                <div class="field-grid">
-                  ${renderField("year_built", "Año construcción", form.year_built)}
-                  ${renderField("condition", "Condición", form.condition)}
-                  ${renderField("legal_status", "Estado legal", form.legal_status)}
-                  ${renderField("safety", "Seguridad", form.safety)}
-                  ${renderField("transport_access", "Acceso / transporte", form.transport_access, "text", "span-2")}
-                  ${renderField("bank_financing_note", "Nota financiamiento", form.bank_financing_note, "text", "span-2")}
-                  ${renderField("down_payment", "Inicial / separación", form.down_payment)}
-                  ${renderField("payment_facilities", "Facilidades de pago", form.payment_facilities)}
-                  ${renderField("estimated_monthly_fee", "Cuota mensual aprox.", form.estimated_monthly_fee)}
-                  ${renderField("transfer_cost", "Costo traspaso", form.transfer_cost)}
-                  ${renderSelect("title_deed", "Título deslindado", String(form.title_deed), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("documents_up_to_date", "Documentos al día", String(form.documents_up_to_date), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("bank_financing", "Financiamiento bancario", String(form.bank_financing), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("water_service", "Servicio de agua", String(form.water_service), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("electric_service", "Servicio eléctrico", String(form.electric_service), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("paved_street", "Calle asfaltada", String(form.paved_street), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                  ${renderSelect("sewer", "Cloaca", String(form.sewer), [
-                    { value: "", label: "No especificado" },
-                    { value: "true", label: "Sí" },
-                    { value: "false", label: "No" },
-                  ])}
-                </div>
-              </div>
-
-              <div class="section-card">
-                <div class="section-head"><h3>Agente y Meta</h3></div>
-                <div class="field-grid">
-                  ${renderField("agent_name", "Nombre del agente", form.agent_name, "text", "span-2")}
-                  ${renderField("agent_phone", "Teléfono del agente", form.agent_phone)}
-                  ${renderField("status", "Status", form.status)}
-                  ${renderField("meta_url", "URL pública para Meta", form.meta_url, "text", "span-2")}
-                  ${renderField("meta_image_url", "URL imagen principal Meta", form.meta_image_url, "text", "span-2")}
-                  ${renderField("meta_availability", "Availability Meta", form.meta_availability)}
-                  <label class="label switch-row span-2">
-                    <input type="checkbox" name="active" ${form.active ? "checked" : ""} />
-                    <span>Propiedad activa</span>
+            <div class="editor-grid">
+              <div class="editor-stack">
+                <section class="raw-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>1. Texto completo de la publicación</h3>
+                      <p>Pega aquí el texto tal como te lo envían por WhatsApp o como sale en el canal.</p>
+                    </div>
+                    <button type="button" class="btn btn-primary" id="parse-post-btn">Autocompletar desde texto</button>
+                  </div>
+                  <label class="label">Texto bruto
+                    <textarea class="textarea" name="raw_post_text" id="raw-post-text" style="min-height:250px">${escapeHtml(form.raw_post_text || "")}</textarea>
                   </label>
-                </div>
+                  <div class="info-box">Este botón intenta sacar operación, categoría, ubicación, precio, habitaciones, baños, parqueos, agente, requisitos y un código base.</div>
+                </section>
+
+                <section class="media-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>2. Galería Cloudinary</h3>
+                      <p>Pega todos los links de imágenes y videos sin hacerlo uno por uno.</p>
+                    </div>
+                  </div>
+                  <div class="two-col">
+                    <label class="label">URLs de imágenes (Cloudinary)
+                      <textarea class="textarea" name="image_urls" id="image-urls" style="min-height:180px">${escapeHtml(form.image_urls || "")}</textarea>
+                    </label>
+                    <label class="label">URLs de videos (Cloudinary)
+                      <textarea class="textarea" name="video_urls" id="video-urls" style="min-height:180px">${escapeHtml(form.video_urls || "")}</textarea>
+                    </label>
+                  </div>
+                  <div class="two-col">
+                    <label class="label">Portada principal
+                      <input class="input" name="primary_image_url" id="primary-image-url" value="${escapeHtml(form.primary_image_url || form.meta_image_url || "")}" placeholder="https://res.cloudinary.com/..." />
+                    </label>
+                    <label class="label">Folder Cloudinary (opcional)
+                      <input class="input" name="cloudinary_folder" value="${escapeHtml(form.cloudinary_folder || "")}" placeholder="lv/rivas-148" />
+                    </label>
+                  </div>
+                  <div id="media-preview-slot">${renderMediaPreview(form)}</div>
+                </section>
               </div>
-            </section>
+
+              <div class="editor-stack">
+                <section class="card-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>3. Datos clave</h3>
+                      <p>Puedes ajustar manualmente lo que haga falta.</p>
+                    </div>
+                  </div>
+                  <div class="form-grid-3">
+                    <label class="label">ID
+                      <input class="input" name="id" value="${escapeHtml(form.id || "")}" />
+                    </label>
+                    <label class="label">retailer_id
+                      <input class="input" name="retailer_id" value="${escapeHtml(form.retailer_id || "")}" />
+                    </label>
+                    <label class="label">code
+                      <input class="input" name="code" value="${escapeHtml(form.code || "")}" />
+                    </label>
+                  </div>
+                  <div class="form-grid">
+                    <label class="label">Título
+                      <input class="input" name="title" value="${escapeHtml(form.title || "")}" />
+                    </label>
+                    <label class="label">Ubicación
+                      <input class="input" name="location" value="${escapeHtml(form.location || "")}" />
+                    </label>
+                  </div>
+                  <div class="form-grid-3">
+                    <label class="label">Categoría
+                      <select class="select" name="category">
+                        <option value="apartamentos" ${form.category === "apartamentos" ? "selected" : ""}>Apartamentos</option>
+                        <option value="casas" ${form.category === "casas" ? "selected" : ""}>Casas</option>
+                        <option value="solares" ${form.category === "solares" ? "selected" : ""}>Solares</option>
+                        <option value="proyectos" ${form.category === "proyectos" ? "selected" : ""}>Proyectos</option>
+                        <option value="locales_comerciales" ${form.category === "locales_comerciales" ? "selected" : ""}>Locales comerciales</option>
+                      </select>
+                    </label>
+                    <label class="label">Operación
+                      <select class="select" name="operation">
+                        <option value="venta" ${form.operation === "venta" ? "selected" : ""}>Venta</option>
+                        <option value="alquiler" ${form.operation === "alquiler" ? "selected" : ""}>Alquiler</option>
+                      </select>
+                    </label>
+                    <label class="label">Moneda
+                      <select class="select" name="currency">
+                        <option value="DOP" ${form.currency === "DOP" ? "selected" : ""}>DOP</option>
+                        <option value="USD" ${form.currency === "USD" ? "selected" : ""}>USD</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="form-grid-3">
+                    <label class="label">Precio
+                      <input class="input" name="price" value="${escapeHtml(form.price || "")}" placeholder="RD$25,900" />
+                    </label>
+                    <label class="label">Habitaciones
+                      <input class="input" name="bedrooms" value="${escapeHtml(form.bedrooms || "")}" />
+                    </label>
+                    <label class="label">Baños
+                      <input class="input" name="bathrooms" value="${escapeHtml(form.bathrooms || "")}" />
+                    </label>
+                  </div>
+                  <div class="form-grid-3">
+                    <label class="label">Parqueos
+                      <input class="input" name="parking" value="${escapeHtml(form.parking || "")}" />
+                    </label>
+                    <label class="label">Nivel / piso
+                      <input class="input" name="floor_level" value="${escapeHtml(form.floor_level || "")}" />
+                    </label>
+                    <label class="label">Duración visita (min)
+                      <input class="input" name="duration_min" value="${escapeHtml(form.duration_min || "")}" />
+                    </label>
+                  </div>
+                  <div class="form-grid-3">
+                    <label class="label">Área m²
+                      <input class="input" name="area_m2" value="${escapeHtml(form.area_m2 || "")}" />
+                    </label>
+                    <label class="label">Solar m²
+                      <input class="input" name="lot_m2" value="${escapeHtml(form.lot_m2 || "")}" />
+                    </label>
+                    <label class="label">Construcción m²
+                      <input class="input" name="construction_m2" value="${escapeHtml(form.construction_m2 || "")}" />
+                    </label>
+                  </div>
+                  <div class="form-grid">
+                    <label class="label">Agente
+                      <input class="input" name="agent_name" value="${escapeHtml(form.agent_name || "")}" />
+                    </label>
+                    <label class="label">Teléfono agente
+                      <input class="input" name="agent_phone" value="${escapeHtml(form.agent_phone || "")}" />
+                    </label>
+                  </div>
+                  <label class="label">Descripción corta
+                    <textarea class="textarea" name="short_description">${escapeHtml(form.short_description || "")}</textarea>
+                  </label>
+                  <div class="two-col">
+                    <label class="label">Características
+                      <textarea class="textarea" name="features" style="min-height:160px">${escapeHtml(form.features || "")}</textarea>
+                    </label>
+                    <label class="label">Requisitos
+                      <textarea class="textarea" name="requirements_text" style="min-height:160px">${escapeHtml(form.requirements_text || "")}</textarea>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="meta-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>4. Meta y extras</h3>
+                      <p>La portada sale de primary_image_url y las demás fotos se envían como imágenes adicionales.</p>
+                    </div>
+                  </div>
+                  <div class="form-grid">
+                    <label class="label">URL pública
+                      <input class="input" name="meta_url" value="${escapeHtml(form.meta_url || "")}" placeholder="https://lvinmobiliarias.com/..." />
+                    </label>
+                    <label class="label">Disponibilidad Meta
+                      <input class="input" name="meta_availability" value="${escapeHtml(form.meta_availability || "in stock")}" />
+                    </label>
+                  </div>
+                  <div class="checkbox-row">
+                    <input type="checkbox" id="field-active" name="active" ${form.active ? "checked" : ""} />
+                    <label for="field-active">Propiedad activa</label>
+                  </div>
+                  <div class="meta-item">
+                    <strong>Preview técnico</strong>
+                    <pre class="json-preview">${escapeHtml(JSON.stringify(preview, null, 2))}</pre>
+                  </div>
+                </section>
+              </div>
+            </div>
           </div>
           <div class="modal-foot">
             <div class="button-row">
-              <button class="btn btn-secondary" type="button" id="cancel-modal-btn">Cancelar</button>
-              <button class="btn btn-primary" type="submit">Guardar propiedad</button>
+              <button type="button" class="btn btn-secondary" id="cancel-modal-btn">Cancelar</button>
+              <button type="submit" class="btn btn-primary">Guardar propiedad</button>
             </div>
           </div>
         </form>
@@ -595,28 +687,34 @@ function renderImportModal() {
   if (!state.importOpen) return `<div class="modal-backdrop" id="import-modal"></div>`;
   return `
     <div class="modal-backdrop open" id="import-modal">
-      <div class="modal" style="width:min(900px,100%)">
+      <div class="modal" style="width:min(980px,100%)">
         <div class="modal-head">
           <div class="modal-title">
             <div>
               <h2>Importar PROPERTY_CATALOG_JSON</h2>
-              <p class="muted">Pega aquí el array completo. Esto reemplaza el contenido actual del panel.</p>
+              <p class="muted">Pega el array completo. Esto reemplaza el contenido actual del panel.</p>
             </div>
             <button class="btn btn-ghost" id="close-import-btn">Cerrar</button>
           </div>
         </div>
         <div class="modal-body">
-          <textarea class="textarea" id="import-json" style="min-height:420px">${escapeHtml(state.importText)}</textarea>
+          <textarea class="textarea" id="import-json" style="min-height:420px">${escapeHtml(state.importText || "")}</textarea>
         </div>
         <div class="modal-foot">
           <div class="button-row">
-            <button class="btn btn-secondary" type="button" id="cancel-import-btn">Cancelar</button>
-            <button class="btn btn-primary" type="button" id="confirm-import-btn">Importar catálogo</button>
+            <button class="btn btn-secondary" id="cancel-import-btn" type="button">Cancelar</button>
+            <button class="btn btn-primary" id="confirm-import-btn" type="button">Importar catálogo</button>
           </div>
         </div>
       </div>
     </div>
   `;
+}
+
+function render() {
+  document.body.classList.toggle("modal-open", !!state.editing || state.importOpen);
+  appRoot.innerHTML = state.authenticated ? renderDashboard() : renderLogin();
+  bindEvents();
 }
 
 async function loadSession() {
@@ -651,17 +749,24 @@ async function boot() {
   render();
 }
 
+function debounce(fn, delay = 280) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+const debouncedRefresh = debounce(async () => {
+  await refreshData();
+  render();
+}, 320);
+
 async function handleLogin(event) {
   event.preventDefault();
   const formData = new FormData(event.currentTarget);
   try {
-    await api("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({
-        username: formData.get("username"),
-        password: formData.get("password"),
-      }),
-    });
+    await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username: formData.get("username"), password: formData.get("password") }) });
     await loadSession();
     await refreshData();
     render();
@@ -703,12 +808,16 @@ function closeImportModal() {
   render();
 }
 
-async function handleSaveProperty(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
+function collectPropertyPayload(form) {
   const formData = new FormData(form);
   const payload = Object.fromEntries(formData.entries());
   payload.active = formData.get("active") === "on";
+  return payload;
+}
+
+async function handleSaveProperty(event) {
+  event.preventDefault();
+  const payload = collectPropertyPayload(event.currentTarget);
   try {
     if (state.editing.__mode === "create") {
       await api("/api/properties", { method: "POST", body: JSON.stringify(payload) });
@@ -738,33 +847,15 @@ async function handleDelete(id) {
 }
 
 async function handleSync(action) {
-  const endpoint = action === "all"
-    ? "/api/sync/all"
-    : action === "meta"
-    ? "/api/sync/meta"
-    : action === "meta-import"
-    ? "/api/meta/import"
-    : "/api/sync/bot";
+  const endpoint = action === "all" ? "/api/sync/all" : action === "meta" ? "/api/sync/meta" : action === "meta-import" ? "/api/meta/import" : "/api/sync/bot";
   try {
     const result = await api(endpoint, { method: "POST" });
     await refreshData();
     render();
-    showToast(result.message || "Sincronización completada", "success");
+    showToast(result.message || "Operación completada", "success");
   } catch (error) {
     await refreshData().catch(() => {});
     render();
-    showToast(error.message, "error");
-  }
-}
-
-async function handleMetaPreview(id) {
-  try {
-    const result = await api(`/api/meta-preview/${encodeURIComponent(id)}`);
-    const slot = document.getElementById("meta-preview-slot");
-    if (slot) {
-      slot.innerHTML = `<div class="preview-panel"><pre>${escapeHtml(JSON.stringify(result.metaPayload, null, 2))}</pre></div>`;
-    }
-  } catch (error) {
     showToast(error.message, "error");
   }
 }
@@ -784,20 +875,50 @@ async function handleImportConfirm() {
   }
 }
 
-async function applyFilters() {
-  await refreshData();
-  render();
+async function handleParsePostText() {
+  const textarea = document.getElementById("raw-post-text");
+  if (!textarea) return;
+  const text = textarea.value || "";
+  if (!text.trim()) {
+    showToast("Pega primero el texto de la publicación", "error");
+    return;
+  }
+
+  const current = collectPropertyPayload(document.getElementById("property-form"));
+  try {
+    const result = await api("/api/properties/parse-text", {
+      method: "POST",
+      body: JSON.stringify({ text, current: { ...current, __mode: undefined, __currentId: undefined } }),
+    });
+    state.editing = { ...propertyToForm(result.item), __mode: state.editing.__mode, __currentId: state.editing.__currentId };
+    render();
+    showToast("Texto procesado y campos autocompletados", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
 }
 
-function debounce(fn, delay = 350) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
-  };
+function updateEditingField(name, value) {
+  if (!state.editing) return;
+  state.editing[name] = value;
 }
 
-const debouncedFilter = debounce(applyFilters, 320);
+function bindLiveEditor() {
+  const propertyForm = document.getElementById("property-form");
+  if (!propertyForm) return;
+
+  propertyForm.querySelectorAll("input, textarea, select").forEach((element) => {
+    const handler = () => {
+      if (element.type === "checkbox") updateEditingField(element.name, element.checked);
+      else updateEditingField(element.name, element.value);
+      if (["image_urls", "video_urls", "primary_image_url", "meta_url", "meta_image_url"].includes(element.name)) {
+        render();
+      }
+    };
+    element.addEventListener("input", handler);
+    element.addEventListener("change", handler);
+  });
+}
 
 function bindEvents() {
   const loginForm = document.getElementById("login-form");
@@ -819,12 +940,16 @@ function bindEvents() {
   const importMetaBtn = document.getElementById("import-meta-btn");
   if (importMetaBtn) importMetaBtn.addEventListener("click", () => handleSync("meta-import"));
 
+  const propertyForm = document.getElementById("property-form");
+  if (propertyForm) propertyForm.addEventListener("submit", handleSaveProperty);
+
+  const parseBtn = document.getElementById("parse-post-btn");
+  if (parseBtn) parseBtn.addEventListener("click", handleParsePostText);
+
   const closeModalBtn = document.getElementById("close-modal-btn");
   if (closeModalBtn) closeModalBtn.addEventListener("click", closePropertyModal);
   const cancelModalBtn = document.getElementById("cancel-modal-btn");
   if (cancelModalBtn) cancelModalBtn.addEventListener("click", closePropertyModal);
-  const propertyForm = document.getElementById("property-form");
-  if (propertyForm) propertyForm.addEventListener("submit", handleSaveProperty);
 
   const closeImportBtn = document.getElementById("close-import-btn");
   if (closeImportBtn) closeImportBtn.addEventListener("click", closeImportModal);
@@ -836,22 +961,19 @@ function bindEvents() {
   const filterQ = document.getElementById("filter-q");
   if (filterQ) filterQ.addEventListener("input", (event) => {
     state.filters.q = event.target.value;
-    debouncedFilter();
+    debouncedRefresh();
   });
   const filterCategory = document.getElementById("filter-category");
-  if (filterCategory) filterCategory.addEventListener("change", (event) => {
+  if (filterCategory) filterCategory.addEventListener("change", async (event) => {
     state.filters.category = event.target.value;
-    applyFilters();
+    await refreshData();
+    render();
   });
   const filterOperation = document.getElementById("filter-operation");
-  if (filterOperation) filterOperation.addEventListener("change", (event) => {
+  if (filterOperation) filterOperation.addEventListener("change", async (event) => {
     state.filters.operation = event.target.value;
-    applyFilters();
-  });
-  const filterActive = document.getElementById("filter-active");
-  if (filterActive) filterActive.addEventListener("change", (event) => {
-    state.filters.active = event.target.value;
-    applyFilters();
+    await refreshData();
+    render();
   });
 
   document.querySelectorAll("[data-select-id]").forEach((row) => {
@@ -879,9 +1001,15 @@ function bindEvents() {
     btn.addEventListener("click", () => handleSync(btn.dataset.syncAction));
   });
 
-  document.querySelectorAll("[data-preview-id]").forEach((btn) => {
-    btn.addEventListener("click", () => handleMetaPreview(btn.dataset.previewId));
+  document.querySelectorAll("[data-set-primary]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      updateEditingField("primary_image_url", btn.dataset.setPrimary);
+      updateEditingField("meta_image_url", btn.dataset.setPrimary);
+      render();
+    });
   });
+
+  bindLiveEditor();
 }
 
 boot();
