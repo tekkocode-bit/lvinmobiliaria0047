@@ -180,11 +180,29 @@ function parsePriceNumber(value) {
   return String(Math.round(n));
 }
 
+function buildMetaMinorUnitsPrice(value, currency = "DOP") {
+  const digits = parsePriceNumber(value);
+  if (!digits) return "";
+  const majorUnits = Number(digits);
+  if (!Number.isFinite(majorUnits)) return "";
+  return String(Math.round(majorUnits * 100));
+}
+
 function formatCatalogPrice(value, currency = "DOP") {
   const digits = parsePriceNumber(value);
   if (!digits) return cleanText(value);
   const prefix = String(currency || "DOP").toUpperCase() === "USD" ? "US$" : "RD$";
   return `${prefix}${Number(digits).toLocaleString("es-DO")}`;
+}
+
+function formatMetaCatalogPrice(value, currency = "DOP") {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  const numeric = Number(String(raw).replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(numeric)) return cleanText(value);
+  const majorUnits = numeric / 100;
+  const prefix = String(currency || "DOP").toUpperCase() === "USD" ? "US$" : "RD$";
+  return `${prefix}${majorUnits.toLocaleString("es-DO")}`;
 }
 
 function detectOperationFromText(value, fallback = "venta") {
@@ -402,31 +420,96 @@ function detectFloorLevel(raw, fallback = "") {
 }
 
 function buildIdentifiersForProperty(property = {}, existingItems = [], currentId = "") {
-  if (cleanText(property.id) && cleanText(property.retailer_id) && cleanText(property.code)) {
-    return { id: cleanText(property.id), retailer_id: cleanText(property.retailer_id), code: cleanText(property.code) };
-  }
-
   const op = operationAbbr(property.operation || "venta");
   const cat = categoryAbbr(property.category || "apartamentos");
   const baseSlug = slugify(`${property.location || property.title || property.category || "propiedad"}`.replace(/\b(resd|residencial|sector|urbanizacion|urbanización)\b/gi, ""), 24)
     .toUpperCase()
     .replace(/-/g, "");
 
-  const existingCodes = new Set(
-    existingItems
-      .filter((item) => !currentId || cleanText(item.id) !== cleanText(currentId))
-      .map((item) => normalizeText(item.retailer_id || item.code || item.id))
-  );
+  const autoBase = `LV-${op}-${cat}-${baseSlug || "PROP"}-001`;
+  const registry = new Set();
 
-  let index = 1;
-  let candidate = "";
-  while (index < 9999) {
-    candidate = `LV-${op}-${cat}-${baseSlug || "PROP"}-${String(index).padStart(3, "0")}`;
-    if (!existingCodes.has(normalizeText(candidate))) break;
-    index += 1;
+  for (const item of existingItems) {
+    if (currentId && cleanText(item.id) === cleanText(currentId)) continue;
+    [item?.id, item?.retailer_id, item?.code].forEach((value) => {
+      const norm = normalizeText(value);
+      if (norm) registry.add(norm);
+    });
   }
 
-  return { id: candidate, retailer_id: candidate, code: candidate };
+  const normalizeIdentifierCandidate = (value) => {
+    const raw = cleanText(value);
+    if (!raw) return "";
+    const collapsed = raw
+      .replace(/\s+/g, "-")
+      .replace(/[^A-Za-z0-9_-]+/g, "-")
+      .replace(/-{2,}/g, "-")
+      .replace(/^-|-$/g, "");
+    return cleanText(collapsed || raw);
+  };
+
+  const reserveIfUnique = (value) => {
+    const raw = cleanText(value);
+    const norm = normalizeText(raw);
+    if (!raw) return "";
+    if (!registry.has(norm)) {
+      registry.add(norm);
+      return raw;
+    }
+    return "";
+  };
+
+  const buildNextIdentifierFromBase = (baseValue) => {
+    const sanitizedBase = normalizeIdentifierCandidate(baseValue || autoBase) || normalizeIdentifierCandidate(autoBase);
+    const directNorm = normalizeText(sanitizedBase);
+    if (sanitizedBase && !registry.has(directNorm)) {
+      registry.add(directNorm);
+      return sanitizedBase;
+    }
+
+    const match = sanitizedBase.match(/^(.*?)-(\d{3,4})$/);
+    const prefix = cleanText(match?.[1] || sanitizedBase) || "LV-PROP";
+    let start = Number(match?.[2] || 1) + 1;
+
+    while (start < 10000) {
+      const candidate = `${prefix}-${String(start).padStart(3, "0")}`;
+      const norm = normalizeText(candidate);
+      if (!registry.has(norm)) {
+        registry.add(norm);
+        return candidate;
+      }
+      start += 1;
+    }
+
+    const fallback = `${prefix}-${Date.now()}`;
+    registry.add(normalizeText(fallback));
+    return fallback;
+  };
+
+  const preferredBase = cleanText(property.retailer_id || property.code || property.id || autoBase) || autoBase;
+  const rawId = cleanText(property.id || "");
+  const rawRetailer = cleanText(property.retailer_id || "");
+  const rawCode = cleanText(property.code || "");
+
+  const idBase = rawId || preferredBase;
+  const retailerBase = rawRetailer || preferredBase;
+  const codeBase = rawCode || preferredBase;
+
+  const sameIdentifierFamily =
+    normalizeText(idBase) === normalizeText(retailerBase) &&
+    normalizeText(idBase) === normalizeText(codeBase);
+
+  if (sameIdentifierFamily) {
+    const keepRaw = reserveIfUnique(rawId || rawRetailer || rawCode);
+    const resolved = keepRaw || buildNextIdentifierFromBase(preferredBase);
+    return { id: resolved, retailer_id: resolved, code: resolved };
+  }
+
+  const resolvedId = reserveIfUnique(rawId) || buildNextIdentifierFromBase(idBase);
+  const resolvedRetailer = reserveIfUnique(rawRetailer) || buildNextIdentifierFromBase(retailerBase);
+  const resolvedCode = reserveIfUnique(rawCode) || buildNextIdentifierFromBase(codeBase);
+
+  return { id: resolvedId, retailer_id: resolvedRetailer, code: resolvedCode };
 }
 
 function normalizeMediaGallery(raw = {}) {
@@ -498,11 +581,11 @@ function normalizeProperty(raw, index = 0, existingItems = [], currentId = "") {
   const media = normalizeMediaGallery(raw || {});
 
   return {
-    id: cleanText(base.id || ids.id),
-    retailer_id: cleanText(base.retailer_id || ids.retailer_id),
-    product_retailer_id: cleanText(base.retailer_id || ids.retailer_id),
-    code: cleanText(base.code || ids.code),
-    title: cleanText(base.title || ids.code),
+    id: cleanText(ids.id || base.id),
+    retailer_id: cleanText(ids.retailer_id || base.retailer_id),
+    product_retailer_id: cleanText(ids.retailer_id || base.retailer_id),
+    code: cleanText(ids.code || base.code),
+    title: cleanText(base.title || ids.code || ids.id),
     category: base.category,
     operation: base.operation,
     price: cleanText(raw?.price || ""),
@@ -626,7 +709,7 @@ function buildMetaPayload(property, defaults = {}, options = {}) {
     retailer_id: cleanText(property.retailer_id || property.code || property.id),
     name: buildMetaName(property),
     description: formatMetaDescription(property),
-    price: parsePriceNumber(property.price),
+    price: buildMetaMinorUnitsPrice(property.price, property.currency),
     currency: cleanText(property.currency || "DOP") || "DOP",
     availability: cleanText(property.meta_availability || defaults.metaAvailability || "in stock") || "in stock",
     url: cleanText(property.meta_url || defaults.metaUrl || ""),
@@ -784,7 +867,7 @@ function buildImportedPropertyFromMetaProduct(product = {}, existing = null, cur
     operation,
     category,
     currency: cleanText(product?.currency || existing?.currency || "DOP") || "DOP",
-    price: formatCatalogPrice(product?.price || existing?.price || "", product?.currency || existing?.currency || "DOP"),
+    price: formatMetaCatalogPrice(product?.price || existing?.price || "", product?.currency || existing?.currency || "DOP") || formatCatalogPrice(existing?.price || "", existing?.currency || product?.currency || "DOP"),
     location,
     short_description: sanitizeMetaImportedDescription(description) || cleanText(existing?.short_description || ""),
     meta_url: cleanText(product?.url || existing?.meta_url || ""),
