@@ -174,6 +174,225 @@ function dedupeProperties(items = []) {
   return sortProperties(output);
 }
 
+function getPropertyMergeKey(item = {}) {
+  return normalizeText(item?.retailer_id || item?.product_retailer_id || item?.code || item?.id || "");
+}
+
+function isPlaceholderProperty(item = {}) {
+  const key = getPropertyMergeKey(item);
+  const title = normalizeText(item?.title || "");
+  return key === "test-1" || key === "test_1" || title === "prueba";
+}
+
+function mergePropertyCollections(baseItems = [], overlayItems = []) {
+  const map = new Map();
+
+  const upsert = (incoming, preferIncoming = true) => {
+    const normalized = normalizeProperty(incoming, map.size);
+    const key = getPropertyMergeKey(normalized);
+    if (!key) return;
+
+    const current = map.get(key);
+    if (!current) {
+      map.set(key, normalized);
+      return;
+    }
+
+    const merged = preferIncoming
+      ? normalizeProperty(
+          {
+            ...current,
+            ...normalized,
+            id: cleanText(current.id || normalized.id || normalized.retailer_id || normalized.code),
+            retailer_id: cleanText(normalized.retailer_id || current.retailer_id || current.code || current.id),
+            code: cleanText(normalized.code || current.code || current.retailer_id || current.id),
+            created_at: cleanText(current.created_at || normalized.created_at || new Date().toISOString()),
+            updated_at: cleanText(normalized.updated_at || new Date().toISOString()),
+          },
+          map.size
+        )
+      : normalizeProperty(
+          {
+            ...normalized,
+            ...current,
+            id: cleanText(current.id || normalized.id || normalized.retailer_id || normalized.code),
+            retailer_id: cleanText(current.retailer_id || normalized.retailer_id || normalized.code || normalized.id),
+            code: cleanText(current.code || normalized.code || normalized.retailer_id || normalized.id),
+            created_at: cleanText(current.created_at || normalized.created_at || new Date().toISOString()),
+            updated_at: cleanText(current.updated_at || normalized.updated_at || new Date().toISOString()),
+          },
+          map.size
+        );
+
+    map.set(key, merged);
+  };
+
+  dedupeProperties(baseItems).forEach((item) => upsert(item, true));
+  dedupeProperties(overlayItems).forEach((item) => upsert(item, true));
+  return sortProperties([...map.values()]);
+}
+
+function parseWordNumber(token) {
+  const t = normalizeText(token);
+  const table = {
+    cero: 0,
+    un: 1,
+    uno: 1,
+    una: 1,
+    dos: 2,
+    tres: 3,
+    cuatro: 4,
+    cinco: 5,
+    seis: 6,
+    siete: 7,
+    ocho: 8,
+    nueve: 9,
+    diez: 10,
+    medio: 0.5,
+    media: 0.5,
+  };
+  return Object.prototype.hasOwnProperty.call(table, t) ? table[t] : null;
+}
+
+function parseFlexibleNumber(token) {
+  const raw = cleanText(token);
+  if (!raw) return "";
+  const normalized = raw.replace(/,/g, ".");
+  const direct = Number(normalized);
+  if (Number.isFinite(direct)) return direct;
+  const word = parseWordNumber(raw);
+  if (word !== null) return word;
+  const match = raw.match(/(\d+(?:[.,]\d+)?)/);
+  if (match) {
+    const n = Number(match[1].replace(/,/g, "."));
+    if (Number.isFinite(n)) return n;
+  }
+  return "";
+}
+
+function formatCatalogPriceFromMeta(priceValue, currency = "") {
+  const value = cleanText(priceValue);
+  const curr = cleanText(currency || "DOP").toUpperCase() || "DOP";
+  if (!value) return "";
+  const digits = parsePriceNumber(value);
+  if (!digits) return value;
+  const prefix = curr === "USD" ? "US$" : curr === "DOP" ? "RD$" : `${curr} `;
+  return `${prefix}${Number(digits).toLocaleString("es-DO")}`.trim();
+}
+
+function cleanImportedShortDescription(description = "") {
+  const cleaned = cleanText(
+    String(description || "")
+      .replace(/propiedad en (venta|alquiler)\.?/gi, "")
+      .replace(/ubicaci[oó]n:\s*[^.]+\.?/gi, "")
+      .replace(/detalles:\s*/gi, "")
+      .replace(/\s+/g, " ")
+  );
+  return cleaned;
+}
+
+function detectOperationFromMetaText(text = "", fallback = "venta") {
+  const t = normalizeText(text);
+  if (t.includes("alquiler") || t.includes("renta") || t.includes("rent")) return "alquiler";
+  if (t.includes("venta") || t.includes("comprar") || t.includes("sale")) return "venta";
+  return cleanText(fallback || "venta") || "venta";
+}
+
+function detectCategoryFromMetaText(text = "", fallback = "apartamentos") {
+  const t = normalizeText(text);
+  if (t.includes("local") || t.includes("nave")) return "locales_comerciales";
+  if (t.includes("solar")) return "solares";
+  if (t.includes("proyecto") || t.includes("en plano")) return "proyectos";
+  if (t.includes("casa")) return "casas";
+  if (t.includes("aparta") || t.includes("apto") || t.includes("apartaestudio") || t.includes("apartastudio") || t.includes("estudio")) return "apartamentos";
+  return cleanText(fallback || "apartamentos") || "apartamentos";
+}
+
+function extractLocationFromMetaDescription(description = "", fallback = "") {
+  const raw = String(description || "");
+  const patterns = [
+    /ubicaci[oó]n:\s*([^\n.]+)/i,
+    /📍\s*([^\n]+)/i,
+    /ubicada? en\s+([^\n.]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) return cleanText(match[1]);
+  }
+
+  return cleanText(fallback || "");
+}
+
+function parseMetricFromText(text = "", kind = "") {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const patternsByKind = {
+    bedrooms: [/(\d+(?:[.,]\d+)?)\s*(hab|habitaci[oó]n|habitaciones|cuartos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis)\s*(hab|habitaci[oó]n|habitaciones|cuartos?)/i],
+    bathrooms: [/(\d+(?:[.,]\d+)?)\s*(bañ[oa]s?|banos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis|medio|media)\s*(bañ[oa]s?|banos?)/i],
+    parking: [/(\d+(?:[.,]\d+)?)\s*(parqueos?|veh[íi]culos?|marquesinas?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis)\s*(parqueos?|veh[íi]culos?|marquesinas?)/i],
+    area_m2: [/(\d+(?:[.,]\d+)?)\s*(m2|mts2|mt2|m²|metros? cuadrados?)/i],
+  };
+
+  const patterns = patternsByKind[kind] || [];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) {
+      const parsed = parseFlexibleNumber(match[1]);
+      if (parsed !== "") return parsed;
+    }
+  }
+  return "";
+}
+
+function extractPhoneFromText(text = "", fallback = "") {
+  const raw = String(text || "");
+  const match = raw.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+  return cleanText(match?.[0] || fallback || "");
+}
+
+function stripMetaPrefixFromName(name = "", fallback = "") {
+  const cleaned = cleanText(String(name || "").replace(/^(VENTA|ALQUILER)\s*[|:-]\s*/i, ""));
+  return cleaned || cleanText(fallback || "");
+}
+
+function buildImportedPropertyFromMetaProduct(product = {}, existing = null) {
+  const nowIso = new Date().toISOString();
+  const retailerId = cleanText(product?.retailer_id || product?.product_retailer_id || existing?.retailer_id || existing?.code || existing?.id || "");
+  const title = stripMetaPrefixFromName(product?.name || existing?.title || retailerId, existing?.title || retailerId);
+  const description = cleanText(product?.description || existing?.short_description || "");
+  const operation = detectOperationFromMetaText(`${cleanText(product?.name)} ${description}`, existing?.operation || "venta");
+  const category = detectCategoryFromMetaText(`${title} ${description}`, existing?.category || "apartamentos");
+  const currency = cleanText(product?.currency || existing?.currency || (String(product?.price || "").toUpperCase().includes("USD") ? "USD" : "DOP") || "DOP") || "DOP";
+  const formattedPrice = formatCatalogPriceFromMeta(product?.price || existing?.price || "", currency) || cleanText(existing?.price || "");
+  const location = extractLocationFromMetaDescription(description, existing?.location || "");
+
+  return normalizeProperty({
+    ...(existing || {}),
+    id: cleanText(existing?.id || retailerId || cleanText(product?.id || "") || cleanText(product?.name || "")) || retailerId,
+    retailer_id: retailerId,
+    product_retailer_id: retailerId,
+    code: cleanText(existing?.code || retailerId || cleanText(product?.id || "")) || retailerId,
+    title,
+    category,
+    operation,
+    price: formattedPrice,
+    currency,
+    location,
+    short_description: cleanImportedShortDescription(description) || cleanText(existing?.short_description || description || ""),
+    bedrooms: existing?.bedrooms !== "" && existing?.bedrooms !== undefined && existing?.bedrooms !== null ? existing.bedrooms : parseMetricFromText(description, "bedrooms"),
+    bathrooms: existing?.bathrooms !== "" && existing?.bathrooms !== undefined && existing?.bathrooms !== null ? existing.bathrooms : parseMetricFromText(description, "bathrooms"),
+    parking: existing?.parking !== "" && existing?.parking !== undefined && existing?.parking !== null ? existing.parking : parseMetricFromText(description, "parking"),
+    area_m2: existing?.area_m2 !== "" && existing?.area_m2 !== undefined && existing?.area_m2 !== null ? existing.area_m2 : parseMetricFromText(description, "area_m2"),
+    meta_url: cleanText(product?.url || existing?.meta_url || ""),
+    meta_image_url: cleanText(product?.image_url || existing?.meta_image_url || ""),
+    meta_availability: cleanText(product?.availability || existing?.meta_availability || "in stock") || "in stock",
+    agent_phone: cleanText(existing?.agent_phone || extractPhoneFromText(description, "")),
+    created_at: cleanText(existing?.created_at || nowIso),
+    updated_at: nowIso,
+  });
+}
+
 function computeStats(items = []) {
   const total = items.length;
   const active = items.filter((p) => p.active !== false).length;
@@ -274,6 +493,9 @@ export function createCatalogAdmin(options = {}) {
     lastMetaSyncAt: null,
     lastMetaSyncOk: null,
     lastMetaSyncMessage: "Aún no sincronizado",
+    lastMetaImportAt: null,
+    lastMetaImportOk: null,
+    lastMetaImportMessage: "Aún no importado desde Meta",
   };
 
   router.use(express.json({ limit: "6mb" }));
@@ -313,11 +535,22 @@ export function createCatalogAdmin(options = {}) {
   async function init() {
     await ensureDataFile();
     const fromDisk = await readFileJson(DATA_FILE, { properties: [] });
-    const diskProps = Array.isArray(fromDisk?.properties) ? dedupeProperties(fromDisk.properties) : [];
+    const sharedProps = dedupeProperties(getCatalog());
+    let diskProps = Array.isArray(fromDisk?.properties) ? dedupeProperties(fromDisk.properties) : [];
+
+    if (sharedProps.length) {
+      diskProps = diskProps.filter((item) => !isPlaceholderProperty(item));
+      const merged = mergePropertyCollections(sharedProps, diskProps);
+      await updateSharedCatalog(merged, false);
+      await writeStore();
+      return;
+    }
+
     if (diskProps.length) {
       await updateSharedCatalog(diskProps, false);
       return;
     }
+
     await writeStore();
   }
 
@@ -489,6 +722,73 @@ export function createCatalogAdmin(options = {}) {
     return { ok: failCount === 0, results, message: syncState.lastMetaSyncMessage };
   }
 
+
+  async function fetchMetaCatalogProducts() {
+    if (!META_ACCESS_TOKEN) throw new Error("Falta META_ACCESS_TOKEN");
+    if (!META_CATALOG_ID) throw new Error("Falta META_CATALOG_ID");
+
+    const items = [];
+    let after = "";
+    let pageCount = 0;
+
+    while (pageCount < 25) {
+      pageCount += 1;
+      const res = await axios.get(`https://graph.facebook.com/${META_GRAPH_VERSION}/${META_CATALOG_ID}/products`, {
+        headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}` },
+        params: {
+          fields: "id,retailer_id,name,description,price,currency,url,image_url,availability",
+          limit: 100,
+          ...(after ? { after } : {}),
+        },
+        timeout: 30000,
+        validateStatus: () => true,
+      });
+
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
+      }
+
+      const pageItems = Array.isArray(res.data?.data) ? res.data.data : [];
+      items.push(...pageItems);
+
+      const nextAfter = cleanText(res.data?.paging?.cursors?.after || "");
+      if (!nextAfter || !pageItems.length) break;
+      after = nextAfter;
+    }
+
+    return items;
+  }
+
+  async function importMetaCatalogIntoPanel() {
+    const metaItems = await fetchMetaCatalogProducts();
+    const current = dedupeProperties(store.properties);
+    const currentByKey = new Map(current.map((item) => [getPropertyMergeKey(item), item]));
+
+    const imported = metaItems
+      .map((product) => buildImportedPropertyFromMetaProduct(product, currentByKey.get(getPropertyMergeKey(product)) || null))
+      .filter(Boolean);
+
+    const merged = mergePropertyCollections(current, imported);
+    await updateSharedCatalog(merged, true);
+
+    const importedCount = imported.length;
+    const createdCount = imported.filter((item) => !currentByKey.has(getPropertyMergeKey(item))).length;
+    const updatedCount = importedCount - createdCount;
+
+    syncState.lastMetaImportAt = new Date().toISOString();
+    syncState.lastMetaImportOk = true;
+    syncState.lastMetaImportMessage = `Meta importado: ${importedCount} leídas, ${createdCount} nuevas, ${updatedCount} actualizadas.`;
+
+    return {
+      ok: true,
+      items: store.properties,
+      importedCount,
+      createdCount,
+      updatedCount,
+      message: syncState.lastMetaImportMessage,
+    };
+  }
+
   async function maybeAutoSync() {
     if (!AUTO_SYNC_ON_SAVE) return { ok: true, skipped: true };
     const bot = await syncBotCatalog(store.properties);
@@ -602,6 +902,7 @@ export function createCatalogAdmin(options = {}) {
         renderDeployHook: !!RENDER_DEPLOY_HOOK_URL,
         renderTriggerDeployOnSync: RENDER_TRIGGER_DEPLOY_ON_SYNC,
         metaReady: !!(META_ACCESS_TOKEN && META_CATALOG_ID),
+        metaImportReady: !!(META_ACCESS_TOKEN && META_CATALOG_ID),
         metaCatalogId: META_CATALOG_ID || null,
         autoSyncOnSave: AUTO_SYNC_ON_SAVE,
       },
@@ -670,6 +971,18 @@ export function createCatalogAdmin(options = {}) {
       syncState.lastBotSyncAt = new Date().toISOString();
       syncState.lastBotSyncOk = false;
       syncState.lastBotSyncMessage = error.message;
+      return res.status(500).json({ ok: false, error: error.message, syncState });
+    }
+  });
+
+  router.post("/api/meta/import", requireAuth, async (_req, res) => {
+    try {
+      const result = await importMetaCatalogIntoPanel();
+      return res.json({ ok: true, ...result, stats: computeStats(store.properties), syncState });
+    } catch (error) {
+      syncState.lastMetaImportAt = new Date().toISOString();
+      syncState.lastMetaImportOk = false;
+      syncState.lastMetaImportMessage = error.message;
       return res.status(500).json({ ok: false, error: error.message, syncState });
     }
   });
