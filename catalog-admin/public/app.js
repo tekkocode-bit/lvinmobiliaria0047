@@ -9,6 +9,7 @@ const state = {
   config: null,
   filters: { q: "", category: "", operation: "", active: "" },
   selectedId: null,
+  uploadBusy: false,
   editing: null,
   importOpen: false,
   importText: "",
@@ -131,6 +132,61 @@ function parseList(value) {
     .split(/[\n,|]+/g)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function uniqueTextList(values = []) {
+  return [...new Set((Array.isArray(values) ? values : parseList(values)).map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function joinTextList(values = []) {
+  return uniqueTextList(values).join("\n");
+}
+
+function removeMediaFromEditing(url, type = "image") {
+  if (!state.editing) return;
+  const currentImages = uniqueTextList(parseList(state.editing.image_urls || []));
+  const currentVideos = uniqueTextList(parseList(state.editing.video_urls || []));
+
+  if (type === "video") {
+    updateEditingField("video_urls", joinTextList(currentVideos.filter((item) => item !== url)));
+    render();
+    return;
+  }
+
+  const nextImages = currentImages.filter((item) => item !== url);
+  updateEditingField("image_urls", joinTextList(nextImages));
+
+  const currentPrimary = String(state.editing.primary_image_url || state.editing.meta_image_url || "").trim();
+  if (!currentPrimary || currentPrimary === url) {
+    const nextPrimary = nextImages[0] || "";
+    updateEditingField("primary_image_url", nextPrimary);
+    updateEditingField("meta_image_url", nextPrimary);
+  }
+
+  render();
+}
+
+function applyUploadedMedia(uploaded = []) {
+  if (!state.editing || !Array.isArray(uploaded) || !uploaded.length) return;
+
+  const nextImages = uniqueTextList([
+    ...parseList(state.editing.image_urls || []),
+    ...uploaded.filter((item) => item.type === "image").map((item) => item.url),
+  ]);
+  const nextVideos = uniqueTextList([
+    ...parseList(state.editing.video_urls || []),
+    ...uploaded.filter((item) => item.type === "video").map((item) => item.url),
+  ]);
+
+  updateEditingField("image_urls", joinTextList(nextImages));
+  updateEditingField("video_urls", joinTextList(nextVideos));
+
+  const currentPrimary = String(state.editing.primary_image_url || state.editing.meta_image_url || "").trim();
+  const nextPrimary = currentPrimary || nextImages[0] || "";
+  updateEditingField("primary_image_url", nextPrimary);
+  updateEditingField("meta_image_url", nextPrimary);
+
+  render();
 }
 
 function normalizeNumericChunk(value) {
@@ -469,7 +525,7 @@ function renderDashboard() {
             <div><strong>Usuario:</strong> ${escapeHtml(state.username || "-")}</div>
             <div><strong>Bot env:</strong> ${escapeHtml(integrations.renderBotEnvKey || "PROPERTY_CATALOG_JSON")}</div>
           </div>
-          <div class="info-box">Pega la publicación completa, deja que el panel autocompletar y luego añade los links de Cloudinary en bloque.</div>
+          <div class="info-box">Pega la publicación completa, deja que el panel autocompletar y luego añade links o sube fotos y videos directo a Cloudinary.</div>
         </div>
         <div class="button-row">
           <button class="btn btn-ghost" id="logout-btn">Cerrar sesión</button>
@@ -581,13 +637,16 @@ function renderDashboard() {
 
 function renderMediaPreview(form) {
   const gallery = getMediaGallery(form);
-  if (!gallery.length) return `<div class="empty-state">Pega aquí los links de Cloudinary de fotos o videos. Uno por línea.</div>`;
+  if (!gallery.length) return `<div class="empty-state">Puedes pegar links de Cloudinary o subir fotos y videos directo desde el panel.</div>`;
   return `<div class="gallery-grid">${gallery.map((item, index) => `
     <div class="gallery-card">
       <div class="gallery-thumb">${item.type === "video" ? `<video src="${escapeHtml(item.url)}" controls playsinline></video>` : `<img src="${escapeHtml(item.url)}" alt="${escapeHtml(form.title || "media")}" />`}</div>
       <div class="gallery-card-body">
         <small>${item.type === "video" ? "Video" : item.primary ? "Portada" : "Imagen extra"}</small>
-        ${item.type === "image" ? `<button type="button" class="btn btn-secondary btn-small" data-set-primary="${escapeHtml(item.url)}">Usar como portada</button>` : `<span class="muted">No se usa como portada</span>`}
+        <div class="button-row">
+          ${item.type === "image" ? `<button type="button" class="btn btn-secondary btn-small" data-set-primary="${escapeHtml(item.url)}">Usar como portada</button>` : `<span class="muted">No se usa como portada</span>`}
+          <button type="button" class="btn btn-ghost btn-small" data-remove-media-url="${escapeHtml(item.url)}" data-remove-media-type="${escapeHtml(item.type)}">Quitar</button>
+        </div>
       </div>
     </div>
   `).join("")}</div>`;
@@ -631,7 +690,24 @@ function renderPropertyModal() {
                   <div class="section-head">
                     <div>
                       <h3>2. Galería Cloudinary</h3>
-                      <p>Pega todos los links de imágenes y videos sin hacerlo uno por uno.</p>
+                      <p>Sube fotos y videos directo desde el panel o pega los links en bloque.</p>
+                    </div>
+                    <span class="badge ${(state.config?.integrations?.cloudinaryReady) ? "active" : "inactive"}">${(state.config?.integrations?.cloudinaryReady) ? "Cloudinary listo" : "Cloudinary pendiente"}</span>
+                  </div>
+                  <div class="upload-grid">
+                    <label class="label">Seleccionar fotos
+                      <input class="input input-file" type="file" id="upload-images-input" accept="image/*" multiple ${state.uploadBusy || !(state.config?.integrations?.cloudinaryReady) ? "disabled" : ""} />
+                    </label>
+                    <div class="upload-action-box">
+                      <button type="button" class="btn btn-primary" id="upload-images-btn" ${state.uploadBusy || !(state.config?.integrations?.cloudinaryReady) ? "disabled" : ""}>${state.uploadBusy ? "Subiendo..." : "Subir fotos"}</button>
+                      <small class="muted">Puedes elegir varias imágenes a la vez.</small>
+                    </div>
+                    <label class="label">Seleccionar videos
+                      <input class="input input-file" type="file" id="upload-videos-input" accept="video/*" multiple ${state.uploadBusy || !(state.config?.integrations?.cloudinaryReady) ? "disabled" : ""} />
+                    </label>
+                    <div class="upload-action-box">
+                      <button type="button" class="btn btn-secondary" id="upload-videos-btn" ${state.uploadBusy || !(state.config?.integrations?.cloudinaryReady) ? "disabled" : ""}>${state.uploadBusy ? "Subiendo..." : "Subir videos"}</button>
+                      <small class="muted">Ideal para recorridos o clips de la propiedad.</small>
                     </div>
                   </div>
                   <div class="two-col">
@@ -647,9 +723,10 @@ function renderPropertyModal() {
                       <input class="input" name="primary_image_url" id="primary-image-url" value="${escapeHtml(form.primary_image_url || form.meta_image_url || "")}" placeholder="https://res.cloudinary.com/..." />
                     </label>
                     <label class="label">Folder Cloudinary (opcional)
-                      <input class="input" name="cloudinary_folder" value="${escapeHtml(form.cloudinary_folder || "")}" placeholder="lv/rivas-148" />
+                      <input class="input" name="cloudinary_folder" value="${escapeHtml(form.cloudinary_folder || state.config?.integrations?.cloudinaryDefaultFolder || "")}" placeholder="lv/rivas-148" />
                     </label>
                   </div>
+                  ${!(state.config?.integrations?.cloudinaryReady) ? `<div class="error-box">Configura CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY y CLOUDINARY_API_SECRET en Render para habilitar la subida directa.</div>` : `<div class="info-box">La primera foto subida se usará como portada si aún no has elegido una.</div>`}
                   <div id="media-preview-slot">${renderMediaPreview(form)}</div>
                 </section>
               </div>
@@ -1012,6 +1089,39 @@ async function handleParsePostText() {
   }
 }
 
+async function handleCloudinaryUpload(kind = "image") {
+  if (!state.editing) return;
+  const input = document.getElementById(kind === "video" ? "upload-videos-input" : "upload-images-input");
+  if (!input) return;
+
+  const files = Array.from(input.files || []);
+  if (!files.length) {
+    showToast(kind === "video" ? "Selecciona al menos un video." : "Selecciona al menos una foto.", "error");
+    return;
+  }
+
+  const folder = document.querySelector('input[name="cloudinary_folder"]')?.value || state.editing.cloudinary_folder || "";
+  const formData = new FormData();
+  formData.append("kind", kind);
+  if (folder) formData.append("folder", folder);
+  files.forEach((file) => formData.append("files", file));
+
+  state.uploadBusy = true;
+  render();
+
+  try {
+    const result = await api("/api/uploads/cloudinary", { method: "POST", body: formData });
+    applyUploadedMedia(result.uploaded || []);
+    input.value = "";
+    showToast(`${result.count || 0} archivo(s) subido(s) a Cloudinary.`, "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    state.uploadBusy = false;
+    render();
+  }
+}
+
 function updateEditingField(name, value) {
   if (!state.editing) return;
   state.editing[name] = value;
@@ -1023,6 +1133,7 @@ function bindLiveEditor() {
 
   propertyForm.querySelectorAll("input, textarea, select").forEach((element) => {
     const handler = () => {
+      if (!element.name) return;
       if (element.type === "checkbox") updateEditingField(element.name, element.checked);
       else updateEditingField(element.name, element.value);
       if (["image_urls", "video_urls", "primary_image_url", "meta_url", "meta_image_url"].includes(element.name)) {
@@ -1059,6 +1170,12 @@ function bindEvents() {
 
   const parseBtn = document.getElementById("parse-post-btn");
   if (parseBtn) parseBtn.addEventListener("click", handleParsePostText);
+
+  const uploadImagesBtn = document.getElementById("upload-images-btn");
+  if (uploadImagesBtn) uploadImagesBtn.addEventListener("click", () => handleCloudinaryUpload("image"));
+
+  const uploadVideosBtn = document.getElementById("upload-videos-btn");
+  if (uploadVideosBtn) uploadVideosBtn.addEventListener("click", () => handleCloudinaryUpload("video"));
 
   const closeModalBtn = document.getElementById("close-modal-btn");
   if (closeModalBtn) closeModalBtn.addEventListener("click", closePropertyModal);
@@ -1120,6 +1237,12 @@ function bindEvents() {
       updateEditingField("primary_image_url", btn.dataset.setPrimary);
       updateEditingField("meta_image_url", btn.dataset.setPrimary);
       render();
+    });
+  });
+
+  document.querySelectorAll("[data-remove-media-url]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      removeMediaFromEditing(btn.dataset.removeMediaUrl, btn.dataset.removeMediaType || "image");
     });
   });
 
