@@ -306,6 +306,7 @@ function renderDashboard() {
             </div>
             <div class="button-row">
               <button class="btn btn-secondary" id="import-btn">Importar JSON</button>
+              <button class="btn btn-secondary" id="import-meta-btn" ${config.integrations?.metaImportReady ? "" : "disabled"}>Importar desde Meta</button>
               <a class="btn btn-secondary" href="${ADMIN_BASE}/api/properties/export">Exportar JSON</a>
               <button class="btn btn-primary" id="new-btn">Nueva propiedad</button>
             </div>
@@ -385,8 +386,17 @@ function renderDashboard() {
               "bot"
             )}
             ${syncCard(
+              "Meta → Panel",
+              "Lee las propiedades ya existentes en Meta y las carga aquí sin duplicarlas por retailer_id.",
+              !!config.integrations?.metaImportReady,
+              syncState.lastMetaImportMessage,
+              syncState.lastMetaImportOk,
+              "Importar desde Meta",
+              "meta-import"
+            )}
+            ${syncCard(
               "Meta Catalog",
-              "Empuja los productos al catálogo usando catalog_management.",
+              "Empuja los productos del panel al catálogo usando catalog_management.",
               !!config.integrations?.metaReady,
               syncState.lastMetaSyncMessage,
               syncState.lastMetaSyncOk,
@@ -728,7 +738,13 @@ async function handleDelete(id) {
 }
 
 async function handleSync(action) {
-  const endpoint = action === "all" ? "/api/sync/all" : action === "meta" ? "/api/sync/meta" : "/api/sync/bot";
+  const endpoint = action === "all"
+    ? "/api/sync/all"
+    : action === "meta"
+    ? "/api/sync/meta"
+    : action === "meta-import"
+    ? "/api/meta/import"
+    : "/api/sync/bot";
   try {
     const result = await api(endpoint, { method: "POST" });
     await refreshData();
@@ -799,6 +815,9 @@ function bindEvents() {
     state.importText = "";
     render();
   });
+
+  const importMetaBtn = document.getElementById("import-meta-btn");
+  if (importMetaBtn) importMetaBtn.addEventListener("click", () => handleSync("meta-import"));
 
   const closeModalBtn = document.getElementById("close-modal-btn");
   if (closeModalBtn) closeModalBtn.addEventListener("click", closePropertyModal);
