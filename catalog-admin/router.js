@@ -29,6 +29,10 @@ function cleanText(value) {
   return String(value ?? "").trim();
 }
 
+function digitsOnly(value) {
+  return String(value || "").replace(/[^\d]/g, "");
+}
+
 function parseList(value) {
   if (Array.isArray(value)) return value.map((v) => cleanText(v)).filter(Boolean);
   return String(value || "")
@@ -41,7 +45,7 @@ function parseMaybeNumber(value) {
   if (value === null || value === undefined || value === "") return "";
   const t = String(value).trim();
   if (!t) return "";
-  const n = Number(t);
+  const n = Number(String(t).replace(/,/g, "."));
   return Number.isFinite(n) ? n : t;
 }
 
@@ -49,9 +53,62 @@ function parseMaybeBoolean(value) {
   if (value === true || value === false) return value;
   const t = normalizeText(value);
   if (!t) return "";
-  if (["si", "sí", "true", "1", "yes"].includes(t)) return true;
-  if (["no", "false", "0"].includes(t)) return false;
-  return String(value).trim();
+  if (["si", "sí", "true", "1", "yes", "aplica", "incluye", "tiene"].includes(t)) return true;
+  if (["no", "false", "0", "none", "no aplica", "no tiene"].includes(t)) return false;
+  return cleanText(value);
+}
+
+function slugify(value, maxLen = 28) {
+  const slug = normalizeText(value)
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, maxLen)
+    .replace(/-$/g, "");
+  return slug || "propiedad";
+}
+
+function toTitleCase(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/(^|\s|[-/])([a-záéíóúñ])/g, (_m, p1, p2) => `${p1}${p2.toUpperCase()}`)
+    .trim();
+}
+
+function parseWordNumber(token) {
+  const t = normalizeText(token);
+  const table = {
+    cero: 0,
+    un: 1,
+    uno: 1,
+    una: 1,
+    dos: 2,
+    tres: 3,
+    cuatro: 4,
+    cinco: 5,
+    seis: 6,
+    siete: 7,
+    ocho: 8,
+    nueve: 9,
+    diez: 10,
+    medio: 0.5,
+    media: 0.5,
+  };
+  return Object.prototype.hasOwnProperty.call(table, t) ? table[t] : null;
+}
+
+function parseFlexibleNumber(token) {
+  const raw = cleanText(token);
+  if (!raw) return "";
+  const direct = Number(String(raw).replace(/,/g, "."));
+  if (Number.isFinite(direct)) return direct;
+  const word = parseWordNumber(raw);
+  if (word !== null) return word;
+  const match = raw.match(/(\d+(?:[.,]\d+)?)/);
+  if (!match) return "";
+  const n = Number(match[1].replace(/,/g, "."));
+  return Number.isFinite(n) ? n : "";
 }
 
 function parsePriceNumber(value) {
@@ -59,8 +116,13 @@ function parsePriceNumber(value) {
   if (!raw) return "";
   let text = normalizeText(raw);
   const hasMillion = text.includes("millon") || text.includes("millones") || /\bmm\b/.test(text);
-  const hasThousand = /\bk\b/.test(text) || text.includes("mil");
-  text = text.replace(/rd\$/g, "").replace(/us\$/g, "").replace(/usd/g, "").replace(/dop/g, "").replace(/,/g, "");
+  const hasThousand = /\bk\b/.test(text) || text.includes(" mil") || /^mil\b/.test(text);
+  text = text
+    .replace(/rd\$/g, "")
+    .replace(/us\$/g, "")
+    .replace(/usd/g, "")
+    .replace(/dop/g, "")
+    .replace(/,/g, "");
   const match = text.match(/\d+(?:\.\d+)?/);
   if (!match) return "";
   let n = Number(match[0]);
@@ -70,42 +132,334 @@ function parsePriceNumber(value) {
   return String(Math.round(n));
 }
 
-function buildMetaName(property) {
-  const op = normalizeText(property.operation || "").includes("alquiler") ? "ALQUILER" : "VENTA";
-  return `${op} | ${cleanText(property.title || property.code || property.id)}`.slice(0, 150);
+function formatCatalogPrice(value, currency = "DOP") {
+  const digits = parsePriceNumber(value);
+  if (!digits) return cleanText(value);
+  const prefix = String(currency || "DOP").toUpperCase() === "USD" ? "US$" : "RD$";
+  return `${prefix}${Number(digits).toLocaleString("es-DO")}`;
 }
 
-function formatMetaDescription(property) {
-  const pieces = [];
-  const op = normalizeText(property.operation || "").includes("alquiler") ? "alquiler" : "venta";
-  pieces.push(`Propiedad en ${op}.`);
-  if (property.short_description) pieces.push(cleanText(property.short_description));
-  if (property.location) pieces.push(`Ubicación: ${cleanText(property.location)}.`);
-  const details = [];
-  if (property.bedrooms !== "" && property.bedrooms !== null && property.bedrooms !== undefined) details.push(`${property.bedrooms} habitaciones`);
-  if (property.bathrooms !== "" && property.bathrooms !== null && property.bathrooms !== undefined) details.push(`${property.bathrooms} baños`);
-  if (property.area_m2 !== "" && property.area_m2 !== null && property.area_m2 !== undefined) details.push(`${property.area_m2} m²`);
-  if (property.parking !== "" && property.parking !== null && property.parking !== undefined) details.push(`${property.parking} parqueos`);
-  if (details.length) pieces.push(`Detalles: ${details.join(", ")}.`);
-  return pieces.join(" ").replace(/\s+/g, " ").trim().slice(0, 5000);
+function detectOperationFromText(value, fallback = "venta") {
+  const t = normalizeText(value);
+  if (t.includes("alquila") || t.includes("alquiler") || t.includes("renta") || t.includes("rent")) return "alquiler";
+  if (t.includes("vende") || t.includes("venta") || t.includes("sale") || t.includes("comprar")) return "venta";
+  return cleanText(fallback || "venta") || "venta";
 }
 
-function normalizeProperty(raw, index = 0) {
-  const id = cleanText(raw?.id || `prop_${index + 1}`);
-  const retailerId = cleanText(raw?.retailer_id || raw?.product_retailer_id || raw?.code || id);
-  const code = cleanText(raw?.code || retailerId || id);
-  const nowIso = new Date().toISOString();
+function detectCategoryFromText(value, fallback = "apartamentos") {
+  const t = normalizeText(value);
+  if (t.includes("solar")) return "solares";
+  if (t.includes("local") || t.includes("nave")) return "locales_comerciales";
+  if (t.includes("proyecto") && !t.includes("apartamento")) return "proyectos";
+  if (t.includes("casa")) return "casas";
+  if (t.includes("apartaestudio") || t.includes("apartastudio") || t.includes("aparta estudio")) return "apartamentos";
+  if (t.includes("apartamento") || t.includes("apto") || t.includes("aparta")) return "apartamentos";
+  return cleanText(fallback || "apartamentos") || "apartamentos";
+}
+
+function categoryAbbr(category) {
+  const key = normalizeText(category || "apartamentos");
+  if (key === "apartamentos") return "APT";
+  if (key === "casas") return "CASA";
+  if (key === "solares") return "SOLAR";
+  if (key === "locales_comerciales") return "LOCAL";
+  if (key === "proyectos") return "PROY";
+  return "PROP";
+}
+
+function operationAbbr(operation) {
+  return normalizeText(operation || "venta") === "alquiler" ? "ALQUILER" : "VENTA";
+}
+
+function detectCurrency(value, fallback = "DOP") {
+  const t = normalizeText(value);
+  if (t.includes("us$") || t.includes("usd") || t.includes("dolar")) return "USD";
+  if (t.includes("rd$") || t.includes("dop") || t.includes("peso")) return "DOP";
+  return cleanText(fallback || "DOP") || "DOP";
+}
+
+function extractMetric(text, patterns = []) {
+  const raw = String(text || "");
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) {
+      const parsed = parseFlexibleNumber(match[1]);
+      if (parsed !== "") return parsed;
+    }
+  }
+  return "";
+}
+
+function cleanLineForParsing(value) {
+  return cleanText(String(value || "").replace(/[\u{1F300}-\u{1FAFF}]/gu, " ").replace(/[✅✔️•▪■▫◆◇⭐✨📍📌☎️📞📲🏠🏡🏢🛏🛁🚗📐💰📝🔹🔸]/gu, " ").replace(/\s+/g, " "));
+}
+
+function stripLinkLines(lines = []) {
+  return lines.filter((line) => !/^https?:\/\//i.test(cleanText(line)) && !normalizeText(line).includes("instagram.com") && !normalizeText(line).includes("whatsapp.com/channel") && !normalizeText(line).includes("lvinmobiliarias.com") && !normalizeText(line).includes("e-mail"));
+}
+
+function extractTitleFromText(raw, operation, category, location) {
+  const lines = stripLinkLines(String(raw || "").split(/\r?\n/g).map((line) => cleanText(line)).filter(Boolean));
+  const candidate = lines.find((line) => {
+    const t = normalizeText(line);
+    return t.includes("lv inmobiliaria") || t.includes("vende") || t.includes("alquila") || t.includes("venta") || t.includes("alquiler");
+  }) || lines[0] || "";
+
+  let title = cleanLineForParsing(candidate)
+    .replace(/^lv inmobiliaria\s*/i, "")
+    .replace(/^(vende|venta|alquila|alquiler)\s*/i, "")
+    .replace(/^[:|\-]+/, "")
+    .trim();
+
+  if (!title) {
+    title = category === "casas" ? "Casa" : category === "solares" ? "Solar" : category === "locales_comerciales" ? "Local comercial" : category === "proyectos" ? "Proyecto inmobiliario" : "Apartamento";
+  }
+
+  if (location && !normalizeText(title).includes(normalizeText(location))) {
+    title = `${title} en ${location}`;
+  }
+
+  return toTitleCase(title.replace(/\s+/g, " "));
+}
+
+function extractLocationFromText(raw, fallback = "") {
+  const lines = stripLinkLines(String(raw || "").split(/\r?\n/g).map((line) => cleanText(line)).filter(Boolean));
+  const byPin = lines.find((line) => /📍/.test(line) || /resd\.|residencial|sector|urbanizaci[oó]n|villa|pont[oó]n|jerem[ií]as|la vega|arenoso|ciudad/i.test(normalizeText(line)));
+  if (byPin) {
+    const cleaned = cleanLineForParsing(byPin)
+      .replace(/^(ubicacion|ubicación)\s*:?/i, "")
+      .trim();
+    if (cleaned && cleaned.length <= 120) return toTitleCase(cleaned);
+  }
+
+  const bodyMatch = String(raw || "").match(/(?:ubicaci[oó]n|sector|resd\.|residencial)[:\s-]*([^\n]+)/i);
+  if (bodyMatch?.[1]) return toTitleCase(cleanLineForParsing(bodyMatch[1]));
+  return cleanText(fallback);
+}
+
+function extractPriceFromText(raw, currency = "DOP", fallback = "") {
+  const patterns = [
+    /(precio[^\n:]*[:\s]+[^\n]+)/i,
+    /(pagar[^\n:]*[:\s]+[^\n]+)/i,
+    /((?:rd\$|us\$|usd)\s*[\d.,]+(?:\s*(?:mil|millones|millon))?)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = String(raw || "").match(pattern);
+    if (match?.[1]) {
+      const numeric = parsePriceNumber(match[1]);
+      if (numeric) return formatCatalogPrice(match[1], detectCurrency(match[1], currency));
+    }
+  }
+
+  if (fallback) return cleanText(fallback);
+  return "";
+}
+
+function extractAgentName(raw, fallback = "") {
+  const match = String(raw || "").match(/agente\s+inmobiliari[ao]\s*[-:–]?\s*([^\n]+)/i);
+  if (match?.[1]) return cleanText(match[1]);
+  return cleanText(fallback);
+}
+
+function extractAgentPhone(raw, fallback = "") {
+  const match = String(raw || "").match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+  if (match?.[0]) return cleanText(match[0]);
+  return cleanText(fallback);
+}
+
+function splitSectionsFromText(raw) {
+  const text = String(raw || "").replace(/\r/g, "");
+  const lines = text.split("\n");
+  const sections = { featureLines: [], requirementLines: [] };
+  let inRequirements = false;
+
+  for (const originalLine of lines) {
+    const line = cleanText(originalLine);
+    if (!line) continue;
+    const norm = normalizeText(line);
+    if (norm.startsWith("requisitos")) {
+      inRequirements = true;
+      continue;
+    }
+    if (norm.includes("informacion y alquiler") || norm.includes("información y alquiler") || norm.includes("agente inmobiliaria") || norm.includes("seguir canal")) {
+      inRequirements = false;
+      continue;
+    }
+    if (/^https?:\/\//i.test(line) || norm.includes("instagram.com") || norm.includes("lvinmobiliarias.com") || norm.includes("whatsapp.com/channel") || norm.includes("e-mail")) {
+      continue;
+    }
+    if (inRequirements) sections.requirementLines.push(line);
+    else sections.featureLines.push(line);
+  }
+
+  return sections;
+}
+
+function extractFeaturesFromText(raw, category = "") {
+  const { featureLines } = splitSectionsFromText(raw);
+  const ignored = [
+    "lv inmobiliaria",
+    "precio",
+    "pagar",
+    "requisitos",
+    "descripcion del inmueble",
+    "descripción del inmueble",
+    "informacion y alquiler",
+    "información y alquiler",
+    "agente inmobiliaria",
+    "seguir canal",
+  ];
+
+  const featureSet = new Set();
+  for (const line of featureLines) {
+    const cleaned = cleanLineForParsing(line)
+      .replace(/^descripcion del inmueble$/i, "")
+      .replace(/^descripci[oó]n$/i, "")
+      .trim();
+    const norm = normalizeText(cleaned);
+    if (!cleaned) continue;
+    if (ignored.some((k) => norm.startsWith(k))) continue;
+    if (norm.includes("lv inmobiliaria")) continue;
+    if (norm.includes("precio") || norm.includes("pagar") || norm.includes("trabajo estable")) continue;
+    if (cleaned.length < 3 || cleaned.length > 140) continue;
+    featureSet.add(cleaned);
+  }
+
+  const fallbackFeature = category === "solares" ? "Solar disponible" : category === "locales_comerciales" ? "Local comercial disponible" : category === "casas" ? "Casa disponible" : "Propiedad disponible";
+  return [...featureSet].slice(0, 40).filter(Boolean).length ? [...featureSet].slice(0, 40) : [fallbackFeature];
+}
+
+function buildShortDescriptionFromText(raw, features = [], fallback = "") {
+  const featurePreview = [...features].slice(0, 8).join(", ");
+  const location = extractLocationFromText(raw, "");
+  const operation = detectOperationFromText(raw, "venta");
+  const category = detectCategoryFromText(raw, "apartamentos");
+  const categoryLabel = category === "casas" ? "Casa" : category === "solares" ? "Solar" : category === "locales_comerciales" ? "Local comercial" : category === "proyectos" ? "Proyecto" : "Apartamento";
+  const opLabel = operation === "alquiler" ? "en alquiler" : "en venta";
+  const base = `${categoryLabel} ${opLabel}${location ? ` en ${location}` : ""}.`;
+  const final = `${base}${featurePreview ? ` Incluye ${featurePreview}.` : ""}`.replace(/\s+/g, " ").trim();
+  return final.length > 18 ? final : cleanText(fallback);
+}
+
+function extractRequirementsText(raw, fallback = "") {
+  const { requirementLines } = splitSectionsFromText(raw);
+  const joined = requirementLines.map((line) => cleanLineForParsing(line)).filter(Boolean).join("\n");
+  return cleanText(joined || fallback || "");
+}
+
+function detectFloorLevel(raw, fallback = "") {
+  const match = String(raw || "").match(/(1er|primer|2do|segundo|3er|tercer|4to|cuarto|5to|quinto)\s+nivel/i);
+  return cleanText(match?.[0] || fallback);
+}
+
+function buildIdentifiersForProperty(property = {}, existingItems = [], currentId = "") {
+  if (cleanText(property.id) && cleanText(property.retailer_id) && cleanText(property.code)) {
+    return { id: cleanText(property.id), retailer_id: cleanText(property.retailer_id), code: cleanText(property.code) };
+  }
+
+  const op = operationAbbr(property.operation || "venta");
+  const cat = categoryAbbr(property.category || "apartamentos");
+  const baseSlug = slugify(`${property.location || property.title || property.category || "propiedad"}`.replace(/\b(resd|residencial|sector|urbanizacion|urbanización)\b/gi, ""), 24)
+    .toUpperCase()
+    .replace(/-/g, "");
+
+  const existingCodes = new Set(
+    existingItems
+      .filter((item) => !currentId || cleanText(item.id) !== cleanText(currentId))
+      .map((item) => normalizeText(item.retailer_id || item.code || item.id))
+  );
+
+  let index = 1;
+  let candidate = "";
+  while (index < 9999) {
+    candidate = `LV-${op}-${cat}-${baseSlug || "PROP"}-${String(index).padStart(3, "0")}`;
+    if (!existingCodes.has(normalizeText(candidate))) break;
+    index += 1;
+  }
+
+  return { id: candidate, retailer_id: candidate, code: candidate };
+}
+
+function normalizeMediaGallery(raw = {}) {
+  const galleryFromRaw = Array.isArray(raw.media_gallery)
+    ? raw.media_gallery
+    : safeJson(raw.media_gallery, null);
+
+  const imageList = parseList(raw.image_urls || raw.meta_additional_image_urls || []);
+  const videoList = parseList(raw.video_urls || raw.meta_video_urls || []);
+  const primaryImageUrl = cleanText(raw.primary_image_url || raw.meta_image_url || "");
+
+  let gallery = [];
+  if (Array.isArray(galleryFromRaw)) {
+    gallery = galleryFromRaw.map((item, index) => ({
+      id: cleanText(item?.id || `${index + 1}`),
+      url: cleanText(item?.url || item),
+      type: normalizeText(item?.type || "image") === "video" ? "video" : "image",
+      primary: item?.primary === true || cleanText(item?.url || item) === primaryImageUrl,
+    })).filter((item) => item.url);
+  }
+
+  if (!gallery.length) {
+    const dedupe = new Set();
+    const pushItem = (url, type, primary = false) => {
+      const key = `${type}|${url}`;
+      if (!url || dedupe.has(key)) return;
+      dedupe.add(key);
+      gallery.push({ id: String(gallery.length + 1), url, type, primary });
+    };
+
+    if (primaryImageUrl) pushItem(primaryImageUrl, "image", true);
+    imageList.forEach((url) => pushItem(cleanText(url), "image", cleanText(url) === primaryImageUrl));
+    videoList.forEach((url) => pushItem(cleanText(url), "video", false));
+  }
+
+  if (gallery.length && !gallery.some((item) => item.type === "image" && item.primary)) {
+    const firstImage = gallery.find((item) => item.type === "image");
+    if (firstImage) firstImage.primary = true;
+  }
+
+  const imageUrls = gallery.filter((item) => item.type === "image").map((item) => item.url);
+  const videoUrls = gallery.filter((item) => item.type === "video").map((item) => item.url);
+  const primaryImage = gallery.find((item) => item.type === "image" && item.primary) || gallery.find((item) => item.type === "image") || null;
+
   return {
-    id,
-    retailer_id: retailerId,
-    product_retailer_id: retailerId,
-    code,
-    title: cleanText(raw?.title || raw?.name || code),
-    category: cleanText(raw?.category || raw?.type || "apartamentos"),
-    operation: cleanText(raw?.operation || "venta"),
-    price: raw?.price ?? "",
-    currency: cleanText(raw?.currency || "DOP"),
+    media_gallery: gallery,
+    image_urls: imageUrls,
+    video_urls: videoUrls,
+    primary_image_url: primaryImage?.url || "",
+    meta_image_url: cleanText(raw.meta_image_url || primaryImage?.url || ""),
+    meta_additional_image_urls: imageUrls.filter((url) => url !== (primaryImage?.url || "")),
+    meta_video_urls: videoUrls,
+  };
+}
+
+function normalizeProperty(raw, index = 0, existingItems = [], currentId = "") {
+  const nowIso = new Date().toISOString();
+  const base = {
+    title: cleanText(raw?.title || raw?.name || ""),
+    category: cleanText(raw?.category || raw?.type || "apartamentos") || "apartamentos",
+    operation: cleanText(raw?.operation || "venta") || "venta",
     location: cleanText(raw?.location || raw?.zone || ""),
+    retailer_id: cleanText(raw?.retailer_id || raw?.product_retailer_id || raw?.code || raw?.id || ""),
+    code: cleanText(raw?.code || raw?.retailer_id || raw?.product_retailer_id || raw?.id || ""),
+    id: cleanText(raw?.id || raw?.retailer_id || raw?.product_retailer_id || raw?.code || `prop_${index + 1}`),
+  };
+
+  const ids = buildIdentifiersForProperty(base, existingItems, currentId);
+  const media = normalizeMediaGallery(raw || {});
+
+  return {
+    id: cleanText(base.id || ids.id),
+    retailer_id: cleanText(base.retailer_id || ids.retailer_id),
+    product_retailer_id: cleanText(base.retailer_id || ids.retailer_id),
+    code: cleanText(base.code || ids.code),
+    title: cleanText(base.title || ids.code),
+    category: base.category,
+    operation: base.operation,
+    price: cleanText(raw?.price || ""),
+    currency: cleanText(raw?.currency || "DOP") || "DOP",
+    location: base.location,
     exact_address: cleanText(raw?.exact_address || raw?.direccion || raw?.direccion_exacta || ""),
     exact_location_reference: cleanText(raw?.exact_location_reference || raw?.referencia_ubicacion || raw?.ubicacion_referencia || ""),
     bedrooms: parseMaybeNumber(raw?.bedrooms ?? raw?.rooms ?? ""),
@@ -138,18 +492,25 @@ function normalizeProperty(raw, index = 0) {
     transport_access: cleanText(raw?.transport_access || raw?.acceso_transporte || ""),
     purchase_steps: cleanText(raw?.purchase_steps || raw?.pasos_compra || raw?.proceso_compra || ""),
     purchase_timeline: cleanText(raw?.purchase_timeline || raw?.tiempo_proceso || raw?.proceso_tiempo || ""),
-    faq: raw?.faq && typeof raw.faq === "object" ? raw.faq : {},
+    faq: raw?.faq && typeof raw.faq === "object" ? raw.faq : safeJson(raw?.faq, {}) || {},
     status: cleanText(raw?.status || "available") || "available",
     duration_min: parseMaybeNumber(raw?.duration_min || ""),
-    active: raw?.active !== false,
+    active: raw?.active !== false && raw?.active !== "false",
     agent_name: cleanText(raw?.agent_name || ""),
     agent_phone: cleanText(raw?.agent_phone || ""),
     meta_url: cleanText(raw?.meta_url || raw?.url || ""),
-    meta_image_url: cleanText(raw?.meta_image_url || raw?.image_url || ""),
     meta_availability: cleanText(raw?.meta_availability || "in stock") || "in stock",
+    raw_post_text: cleanText(raw?.raw_post_text || raw?.source_text || ""),
+    requirements_text: cleanText(raw?.requirements_text || ""),
+    cloudinary_folder: cleanText(raw?.cloudinary_folder || ""),
+    ...media,
     updated_at: cleanText(raw?.updated_at || nowIso),
     created_at: cleanText(raw?.created_at || nowIso),
   };
+}
+
+function getPropertyMergeKey(item = {}) {
+  return normalizeText(item?.retailer_id || item?.product_retailer_id || item?.code || item?.id || "");
 }
 
 function sortProperties(items = []) {
@@ -162,235 +523,69 @@ function sortProperties(items = []) {
 }
 
 function dedupeProperties(items = []) {
-  const seen = new Set();
-  const output = [];
-  for (const item of items) {
-    const normalized = normalizeProperty(item, output.length);
-    const key = normalizeText(normalized.id || normalized.retailer_id || normalized.code);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    output.push(normalized);
+  const map = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const normalized = normalizeProperty(item, map.size, [...map.values()], cleanText(item?.id || ""));
+    const key = getPropertyMergeKey(normalized);
+    if (!key) continue;
+    map.set(key, normalized);
   }
-  return sortProperties(output);
-}
-
-function getPropertyMergeKey(item = {}) {
-  return normalizeText(item?.retailer_id || item?.product_retailer_id || item?.code || item?.id || "");
-}
-
-function isPlaceholderProperty(item = {}) {
-  const key = getPropertyMergeKey(item);
-  const title = normalizeText(item?.title || "");
-  return key === "test-1" || key === "test_1" || title === "prueba";
+  return sortProperties([...map.values()]);
 }
 
 function mergePropertyCollections(baseItems = [], overlayItems = []) {
   const map = new Map();
-
-  const upsert = (incoming, preferIncoming = true) => {
-    const normalized = normalizeProperty(incoming, map.size);
+  const upsert = (item) => {
+    const normalized = normalizeProperty(item, map.size, [...map.values()], cleanText(item?.id || ""));
     const key = getPropertyMergeKey(normalized);
     if (!key) return;
-
     const current = map.get(key);
     if (!current) {
       map.set(key, normalized);
       return;
     }
-
-    const merged = preferIncoming
-      ? normalizeProperty(
-          {
-            ...current,
-            ...normalized,
-            id: cleanText(current.id || normalized.id || normalized.retailer_id || normalized.code),
-            retailer_id: cleanText(normalized.retailer_id || current.retailer_id || current.code || current.id),
-            code: cleanText(normalized.code || current.code || current.retailer_id || current.id),
-            created_at: cleanText(current.created_at || normalized.created_at || new Date().toISOString()),
-            updated_at: cleanText(normalized.updated_at || new Date().toISOString()),
-          },
-          map.size
-        )
-      : normalizeProperty(
-          {
-            ...normalized,
-            ...current,
-            id: cleanText(current.id || normalized.id || normalized.retailer_id || normalized.code),
-            retailer_id: cleanText(current.retailer_id || normalized.retailer_id || normalized.code || normalized.id),
-            code: cleanText(current.code || normalized.code || normalized.retailer_id || normalized.id),
-            created_at: cleanText(current.created_at || normalized.created_at || new Date().toISOString()),
-            updated_at: cleanText(current.updated_at || normalized.updated_at || new Date().toISOString()),
-          },
-          map.size
-        );
-
-    map.set(key, merged);
+    map.set(key, normalizeProperty({ ...current, ...normalized, created_at: current.created_at || normalized.created_at }, map.size, [...map.values()], current.id));
   };
-
-  dedupeProperties(baseItems).forEach((item) => upsert(item, true));
-  dedupeProperties(overlayItems).forEach((item) => upsert(item, true));
+  dedupeProperties(baseItems).forEach(upsert);
+  dedupeProperties(overlayItems).forEach(upsert);
   return sortProperties([...map.values()]);
 }
 
-function parseWordNumber(token) {
-  const t = normalizeText(token);
-  const table = {
-    cero: 0,
-    un: 1,
-    uno: 1,
-    una: 1,
-    dos: 2,
-    tres: 3,
-    cuatro: 4,
-    cinco: 5,
-    seis: 6,
-    siete: 7,
-    ocho: 8,
-    nueve: 9,
-    diez: 10,
-    medio: 0.5,
-    media: 0.5,
+function isPlaceholderProperty(item = {}) {
+  const key = getPropertyMergeKey(item);
+  const title = normalizeText(item?.title || "");
+  return key === "test-1" || title === "prueba";
+}
+
+function buildMetaName(property) {
+  return `${normalizeText(property.operation || "").includes("alquiler") ? "ALQUILER" : "VENTA"} | ${cleanText(property.title || property.code || property.id)}`.slice(0, 150);
+}
+
+function formatMetaDescription(property) {
+  const parts = [];
+  const operation = normalizeText(property.operation || "").includes("alquiler") ? "alquiler" : "venta";
+  parts.push(`Propiedad en ${operation}.`);
+  if (property.short_description) parts.push(cleanText(property.short_description));
+  if (property.location) parts.push(`Ubicación: ${cleanText(property.location)}.`);
+  if (property.requirements_text) parts.push(`Requisitos: ${cleanText(property.requirements_text).replace(/\n+/g, "; ")}.`);
+  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 5000);
+}
+
+function buildMetaPayload(property, defaults = {}, options = {}) {
+  const gallery = normalizeMediaGallery(property);
+  const extraImages = [...gallery.meta_additional_image_urls].filter(Boolean);
+  return {
+    retailer_id: cleanText(property.retailer_id || property.code || property.id),
+    name: buildMetaName(property),
+    description: formatMetaDescription(property),
+    price: parsePriceNumber(property.price),
+    currency: cleanText(property.currency || "DOP") || "DOP",
+    availability: cleanText(property.meta_availability || defaults.metaAvailability || "in stock") || "in stock",
+    url: cleanText(property.meta_url || defaults.metaUrl || ""),
+    image_url: cleanText(property.meta_image_url || gallery.meta_image_url || defaults.metaImageUrl || ""),
+    ...(extraImages.length ? { additional_image_urls: JSON.stringify(extraImages.slice(0, 20)) } : {}),
+    ...(options.extraMetaFields || {}),
   };
-  return Object.prototype.hasOwnProperty.call(table, t) ? table[t] : null;
-}
-
-function parseFlexibleNumber(token) {
-  const raw = cleanText(token);
-  if (!raw) return "";
-  const normalized = raw.replace(/,/g, ".");
-  const direct = Number(normalized);
-  if (Number.isFinite(direct)) return direct;
-  const word = parseWordNumber(raw);
-  if (word !== null) return word;
-  const match = raw.match(/(\d+(?:[.,]\d+)?)/);
-  if (match) {
-    const n = Number(match[1].replace(/,/g, "."));
-    if (Number.isFinite(n)) return n;
-  }
-  return "";
-}
-
-function formatCatalogPriceFromMeta(priceValue, currency = "") {
-  const value = cleanText(priceValue);
-  const curr = cleanText(currency || "DOP").toUpperCase() || "DOP";
-  if (!value) return "";
-  const digits = parsePriceNumber(value);
-  if (!digits) return value;
-  const prefix = curr === "USD" ? "US$" : curr === "DOP" ? "RD$" : `${curr} `;
-  return `${prefix}${Number(digits).toLocaleString("es-DO")}`.trim();
-}
-
-function cleanImportedShortDescription(description = "") {
-  const cleaned = cleanText(
-    String(description || "")
-      .replace(/propiedad en (venta|alquiler)\.?/gi, "")
-      .replace(/ubicaci[oó]n:\s*[^.]+\.?/gi, "")
-      .replace(/detalles:\s*/gi, "")
-      .replace(/\s+/g, " ")
-  );
-  return cleaned;
-}
-
-function detectOperationFromMetaText(text = "", fallback = "venta") {
-  const t = normalizeText(text);
-  if (t.includes("alquiler") || t.includes("renta") || t.includes("rent")) return "alquiler";
-  if (t.includes("venta") || t.includes("comprar") || t.includes("sale")) return "venta";
-  return cleanText(fallback || "venta") || "venta";
-}
-
-function detectCategoryFromMetaText(text = "", fallback = "apartamentos") {
-  const t = normalizeText(text);
-  if (t.includes("local") || t.includes("nave")) return "locales_comerciales";
-  if (t.includes("solar")) return "solares";
-  if (t.includes("proyecto") || t.includes("en plano")) return "proyectos";
-  if (t.includes("casa")) return "casas";
-  if (t.includes("aparta") || t.includes("apto") || t.includes("apartaestudio") || t.includes("apartastudio") || t.includes("estudio")) return "apartamentos";
-  return cleanText(fallback || "apartamentos") || "apartamentos";
-}
-
-function extractLocationFromMetaDescription(description = "", fallback = "") {
-  const raw = String(description || "");
-  const patterns = [
-    /ubicaci[oó]n:\s*([^\n.]+)/i,
-    /📍\s*([^\n]+)/i,
-    /ubicada? en\s+([^\n.]+)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = raw.match(pattern);
-    if (match?.[1]) return cleanText(match[1]);
-  }
-
-  return cleanText(fallback || "");
-}
-
-function parseMetricFromText(text = "", kind = "") {
-  const raw = String(text || "");
-  if (!raw) return "";
-  const patternsByKind = {
-    bedrooms: [/(\d+(?:[.,]\d+)?)\s*(hab|habitaci[oó]n|habitaciones|cuartos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis)\s*(hab|habitaci[oó]n|habitaciones|cuartos?)/i],
-    bathrooms: [/(\d+(?:[.,]\d+)?)\s*(bañ[oa]s?|banos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis|medio|media)\s*(bañ[oa]s?|banos?)/i],
-    parking: [/(\d+(?:[.,]\d+)?)\s*(parqueos?|veh[íi]culos?|marquesinas?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis)\s*(parqueos?|veh[íi]culos?|marquesinas?)/i],
-    area_m2: [/(\d+(?:[.,]\d+)?)\s*(m2|mts2|mt2|m²|metros? cuadrados?)/i],
-  };
-
-  const patterns = patternsByKind[kind] || [];
-  for (const pattern of patterns) {
-    const match = raw.match(pattern);
-    if (match?.[1]) {
-      const parsed = parseFlexibleNumber(match[1]);
-      if (parsed !== "") return parsed;
-    }
-  }
-  return "";
-}
-
-function extractPhoneFromText(text = "", fallback = "") {
-  const raw = String(text || "");
-  const match = raw.match(/(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
-  return cleanText(match?.[0] || fallback || "");
-}
-
-function stripMetaPrefixFromName(name = "", fallback = "") {
-  const cleaned = cleanText(String(name || "").replace(/^(VENTA|ALQUILER)\s*[|:-]\s*/i, ""));
-  return cleaned || cleanText(fallback || "");
-}
-
-function buildImportedPropertyFromMetaProduct(product = {}, existing = null) {
-  const nowIso = new Date().toISOString();
-  const retailerId = cleanText(product?.retailer_id || product?.product_retailer_id || existing?.retailer_id || existing?.code || existing?.id || "");
-  const title = stripMetaPrefixFromName(product?.name || existing?.title || retailerId, existing?.title || retailerId);
-  const description = cleanText(product?.description || existing?.short_description || "");
-  const operation = detectOperationFromMetaText(`${cleanText(product?.name)} ${description}`, existing?.operation || "venta");
-  const category = detectCategoryFromMetaText(`${title} ${description}`, existing?.category || "apartamentos");
-  const currency = cleanText(product?.currency || existing?.currency || (String(product?.price || "").toUpperCase().includes("USD") ? "USD" : "DOP") || "DOP") || "DOP";
-  const formattedPrice = formatCatalogPriceFromMeta(product?.price || existing?.price || "", currency) || cleanText(existing?.price || "");
-  const location = extractLocationFromMetaDescription(description, existing?.location || "");
-
-  return normalizeProperty({
-    ...(existing || {}),
-    id: cleanText(existing?.id || retailerId || cleanText(product?.id || "") || cleanText(product?.name || "")) || retailerId,
-    retailer_id: retailerId,
-    product_retailer_id: retailerId,
-    code: cleanText(existing?.code || retailerId || cleanText(product?.id || "")) || retailerId,
-    title,
-    category,
-    operation,
-    price: formattedPrice,
-    currency,
-    location,
-    short_description: cleanImportedShortDescription(description) || cleanText(existing?.short_description || description || ""),
-    bedrooms: existing?.bedrooms !== "" && existing?.bedrooms !== undefined && existing?.bedrooms !== null ? existing.bedrooms : parseMetricFromText(description, "bedrooms"),
-    bathrooms: existing?.bathrooms !== "" && existing?.bathrooms !== undefined && existing?.bathrooms !== null ? existing.bathrooms : parseMetricFromText(description, "bathrooms"),
-    parking: existing?.parking !== "" && existing?.parking !== undefined && existing?.parking !== null ? existing.parking : parseMetricFromText(description, "parking"),
-    area_m2: existing?.area_m2 !== "" && existing?.area_m2 !== undefined && existing?.area_m2 !== null ? existing.area_m2 : parseMetricFromText(description, "area_m2"),
-    meta_url: cleanText(product?.url || existing?.meta_url || ""),
-    meta_image_url: cleanText(product?.image_url || existing?.meta_image_url || ""),
-    meta_availability: cleanText(product?.availability || existing?.meta_availability || "in stock") || "in stock",
-    agent_phone: cleanText(existing?.agent_phone || extractPhoneFromText(description, "")),
-    created_at: cleanText(existing?.created_at || nowIso),
-    updated_at: nowIso,
-  });
 }
 
 function computeStats(items = []) {
@@ -398,13 +593,20 @@ function computeStats(items = []) {
   const active = items.filter((p) => p.active !== false).length;
   const alquiler = items.filter((p) => normalizeText(p.operation) === "alquiler").length;
   const venta = items.filter((p) => normalizeText(p.operation) === "venta").length;
-  const metaReady = items.filter((p) => buildMetaPayload(p, {}, {}).url && buildMetaPayload(p, {}, {}).image_url && buildMetaPayload(p, {}, {}).price).length;
-  return { total, active, alquiler, venta, metaReady };
+  const withMedia = items.filter((p) => Array.isArray(p.image_urls) && p.image_urls.length).length;
+  const metaReady = items.filter((p) => {
+    const payload = buildMetaPayload(p, {}, {});
+    return payload.url && payload.image_url && payload.price;
+  }).length;
+  return { total, active, alquiler, venta, withMedia, metaReady };
 }
 
 function serializeCatalogJson(items = []) {
-  const cleaned = items.map((p) => ({ ...p, product_retailer_id: p.retailer_id }));
-  return JSON.stringify(cleaned, null, 2);
+  return JSON.stringify(
+    items.map((item) => ({ ...item, product_retailer_id: item.retailer_id })),
+    null,
+    2
+  );
 }
 
 function createSessionToken(username, secret, ttlMs) {
@@ -440,21 +642,83 @@ function parseCookies(req) {
   return cookies;
 }
 
-function buildMetaPayload(property, defaults = {}, options = {}) {
-  const availability = cleanText(property.meta_availability || defaults.metaAvailability || "in stock") || "in stock";
-  const url = cleanText(property.meta_url || defaults.metaUrl || "");
-  const imageUrl = cleanText(property.meta_image_url || defaults.metaImageUrl || "");
-  return {
-    retailer_id: cleanText(property.retailer_id || property.code || property.id),
-    name: buildMetaName(property),
-    description: formatMetaDescription(property),
-    price: parsePriceNumber(property.price),
-    currency: cleanText(property.currency || "DOP") || "DOP",
-    availability,
-    url,
-    image_url: imageUrl,
-    ...(options.extraMetaFields || {}),
+function sanitizeMetaImportedDescription(value = "") {
+  return cleanText(String(value || "").replace(/\bpropiedad en (venta|alquiler)\.?/gi, "").replace(/\s+/g, " "));
+}
+
+function buildImportedPropertyFromMetaProduct(product = {}, existing = null, currentItems = []) {
+  const description = cleanText(product?.description || existing?.short_description || "");
+  const operation = detectOperationFromText(`${product?.name || ""} ${description}`, existing?.operation || "venta");
+  const category = detectCategoryFromText(`${product?.name || ""} ${description}`, existing?.category || "apartamentos");
+  const location = extractLocationFromText(description, existing?.location || "");
+  const title = extractTitleFromText(product?.name || existing?.title || "", operation, category, location);
+  const base = {
+    ...(existing || {}),
+    id: cleanText(existing?.id || product?.retailer_id || product?.id || ""),
+    retailer_id: cleanText(product?.retailer_id || existing?.retailer_id || existing?.code || existing?.id || ""),
+    code: cleanText(existing?.code || product?.retailer_id || product?.id || ""),
+    title,
+    operation,
+    category,
+    currency: cleanText(product?.currency || existing?.currency || "DOP") || "DOP",
+    price: formatCatalogPrice(product?.price || existing?.price || "", product?.currency || existing?.currency || "DOP"),
+    location,
+    short_description: sanitizeMetaImportedDescription(description) || cleanText(existing?.short_description || ""),
+    meta_url: cleanText(product?.url || existing?.meta_url || ""),
+    meta_image_url: cleanText(product?.image_url || existing?.meta_image_url || ""),
+    meta_availability: cleanText(product?.availability || existing?.meta_availability || "in stock") || "in stock",
+    bedrooms: existing?.bedrooms !== undefined && existing?.bedrooms !== "" ? existing.bedrooms : extractMetric(description, [/([\d.,]+)\s*(?:hab|habitaciones?|cuartos?)/i]),
+    bathrooms: existing?.bathrooms !== undefined && existing?.bathrooms !== "" ? existing.bathrooms : extractMetric(description, [/([\d.,]+)\s*(?:baños?|banos?)/i]),
+    parking: existing?.parking !== undefined && existing?.parking !== "" ? existing.parking : extractMetric(description, [/([\d.,]+)\s*(?:parqueos?|vehiculos?|vehículos?|marquesinas?)/i]),
+    area_m2: existing?.area_m2 !== undefined && existing?.area_m2 !== "" ? existing.area_m2 : extractMetric(description, [/([\d.,]+)\s*(?:m2|mt2|mts2|m²)/i]),
+    agent_phone: cleanText(existing?.agent_phone || extractAgentPhone(description, "")),
+    agent_name: cleanText(existing?.agent_name || extractAgentName(description, "")),
+    image_urls: existing?.image_urls || [cleanText(product?.image_url || "")].filter(Boolean),
+    primary_image_url: cleanText(existing?.primary_image_url || product?.image_url || ""),
+    updated_at: new Date().toISOString(),
+    created_at: cleanText(existing?.created_at || new Date().toISOString()),
   };
+  return normalizeProperty(base, 0, currentItems, cleanText(existing?.id || base.id));
+}
+
+function parseListingTextToProperty(rawText = "", current = {}, existingItems = []) {
+  const raw = cleanText(rawText || current?.raw_post_text || "");
+  const operation = detectOperationFromText(raw, current?.operation || "venta");
+  const category = detectCategoryFromText(raw, current?.category || "apartamentos");
+  const location = extractLocationFromText(raw, current?.location || "");
+  const title = extractTitleFromText(raw, operation, category, location || current?.location || "");
+  const currency = detectCurrency(raw, current?.currency || "DOP");
+  const features = extractFeaturesFromText(raw, category);
+  const shortDescription = buildShortDescriptionFromText(raw, features, current?.short_description || "");
+  const requirementsText = extractRequirementsText(raw, current?.requirements_text || "");
+
+  const partial = {
+    ...current,
+    raw_post_text: raw,
+    title,
+    operation,
+    category,
+    location: location || current?.location || "",
+    price: extractPriceFromText(raw, currency, current?.price || ""),
+    currency,
+    bedrooms: extractMetric(raw, [/([\d.,]+)\s*(?:hab|habitaciones?|cuartos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*(?:hab|habitaciones?|cuartos?)/i]) || current?.bedrooms || "",
+    bathrooms: extractMetric(raw, [/([\d.,]+)\s*(?:baños?|banos?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|medio|media)\s*(?:baños?|banos?)/i]) || current?.bathrooms || "",
+    parking: extractMetric(raw, [/([\d.,]+)\s*(?:parqueos?|vehículos?|vehiculos?|marquesinas?)/i, /\b(un|uno|una|dos|tres|cuatro|cinco|seis)\s*(?:parqueos?|vehículos?|vehiculos?|marquesinas?)/i]) || current?.parking || "",
+    area_m2: extractMetric(raw, [/([\d.,]+)\s*(?:m2|mt2|mts2|m²)/i]) || current?.area_m2 || "",
+    lot_m2: extractMetric(raw, [/([\d.,]+)\s*mts?2\s*de\s*solar/i]) || current?.lot_m2 || "",
+    construction_m2: extractMetric(raw, [/([\d.,]+)\s*mts?2\s*de\s*construcci[oó]n/i]) || current?.construction_m2 || "",
+    floor_level: detectFloorLevel(raw, current?.floor_level || ""),
+    short_description: shortDescription,
+    features,
+    requirements_text: requirementsText,
+    agent_phone: extractAgentPhone(raw, current?.agent_phone || ""),
+    agent_name: extractAgentName(raw, current?.agent_name || ""),
+    meta_url: cleanText(current?.meta_url || ""),
+    meta_image_url: cleanText(current?.meta_image_url || current?.primary_image_url || ""),
+  };
+
+  const normalized = normalizeProperty(partial, 0, existingItems, cleanText(current?.id || ""));
+  return normalized;
 }
 
 export function createCatalogAdmin(options = {}) {
@@ -498,8 +762,8 @@ export function createCatalogAdmin(options = {}) {
     lastMetaImportMessage: "Aún no importado desde Meta",
   };
 
-  router.use(express.json({ limit: "6mb" }));
-  router.use(express.urlencoded({ extended: true, limit: "6mb" }));
+  router.use(express.json({ limit: "8mb" }));
+  router.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
   async function ensureDataFile() {
     await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
@@ -556,10 +820,7 @@ export function createCatalogAdmin(options = {}) {
 
   function setSessionCookie(res, token) {
     const maxAge = Math.floor(SESSION_TTL_MS / 1000);
-    res.setHeader(
-      "Set-Cookie",
-      `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=${ADMIN_BASE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`
-    );
+    res.setHeader("Set-Cookie", `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=${ADMIN_BASE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`);
   }
 
   function clearSessionCookie(res) {
@@ -576,55 +837,29 @@ export function createCatalogAdmin(options = {}) {
   }
 
   async function updateRenderCatalogEnv(catalogJson) {
-    if (!RENDER_API_KEY || !RENDER_BOT_SERVICE_ID) return { ok: true, skipped: true, message: "Sin credenciales Render" };
+    if (!RENDER_API_KEY || !RENDER_BOT_SERVICE_ID) {
+      return { ok: true, skipped: true, message: "Sin credenciales Render" };
+    }
 
-    const headers = {
-      Authorization: `Bearer ${RENDER_API_KEY}`,
-      "Content-Type": "application/json",
-    };
-
+    const headers = { Authorization: `Bearer ${RENDER_API_KEY}`, "Content-Type": "application/json" };
     const attempts = [
-      {
-        method: "patch",
-        url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}`,
-        body: { envVars: [{ key: RENDER_BOT_ENV_KEY, value: catalogJson }] },
-      },
-      {
-        method: "patch",
-        url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars`,
-        body: [{ key: RENDER_BOT_ENV_KEY, value: catalogJson }],
-      },
-      {
-        method: "put",
-        url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars/${encodeURIComponent(RENDER_BOT_ENV_KEY)}`,
-        body: { value: catalogJson },
-      },
-      {
-        method: "post",
-        url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars`,
-        body: { key: RENDER_BOT_ENV_KEY, value: catalogJson },
-      },
+      { method: "patch", url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}`, body: { envVars: [{ key: RENDER_BOT_ENV_KEY, value: catalogJson }] } },
+      { method: "patch", url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars`, body: [{ key: RENDER_BOT_ENV_KEY, value: catalogJson }] },
+      { method: "put", url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars/${encodeURIComponent(RENDER_BOT_ENV_KEY)}`, body: { value: catalogJson } },
+      { method: "post", url: `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/env-vars`, body: { key: RENDER_BOT_ENV_KEY, value: catalogJson } },
     ];
 
     let lastError = null;
     for (const attempt of attempts) {
       try {
-        const res = await axios({
-          method: attempt.method,
-          url: attempt.url,
-          headers,
-          data: attempt.body,
-          timeout: 25000,
-          validateStatus: () => true,
-        });
-        if (res.status >= 200 && res.status < 300) {
-          return { ok: true, response: res.data, attempt: `${attempt.method.toUpperCase()} ${attempt.url}` };
-        }
+        const res = await axios({ method: attempt.method, url: attempt.url, headers, data: attempt.body, timeout: 25000, validateStatus: () => true });
+        if (res.status >= 200 && res.status < 300) return { ok: true, response: res.data, attempt: `${attempt.method.toUpperCase()} ${attempt.url}` };
         lastError = new Error(`Render respondió ${res.status}: ${JSON.stringify(res.data)}`);
       } catch (error) {
         lastError = error;
       }
     }
+
     throw lastError || new Error("No se pudo actualizar la variable en Render");
   }
 
@@ -637,12 +872,7 @@ export function createCatalogAdmin(options = {}) {
     if (!RENDER_API_KEY || !RENDER_BOT_SERVICE_ID) return { ok: false, mode: "none" };
 
     const headers = { Authorization: `Bearer ${RENDER_API_KEY}` };
-    const attempts = [
-      `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/deploys`,
-      `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/deploy`,
-    ];
-
-    for (const url of attempts) {
+    for (const url of [`${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/deploys`, `${RENDER_API_BASE_URL}/services/${RENDER_BOT_SERVICE_ID}/deploy`]) {
       const res = await axios.post(url, {}, { headers, timeout: 20000, validateStatus: () => true });
       if (res.status >= 200 && res.status < 300) return { ok: true, mode: url };
     }
@@ -667,20 +897,33 @@ export function createCatalogAdmin(options = {}) {
 
   async function postMetaProduct(payload) {
     const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${META_CATALOG_ID}/products`;
-    const params = new URLSearchParams();
-    Object.entries(payload).forEach(([key, value]) => {
-      if (value !== undefined && value !== null && String(value).trim() !== "") params.append(key, String(value));
-    });
-    const res = await axios.post(url, params, {
-      headers: {
-        Authorization: `Bearer ${META_ACCESS_TOKEN}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      timeout: 30000,
-      validateStatus: () => true,
-    });
-    if (res.status >= 200 && res.status < 300) return res.data;
-    throw new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
+    const makeParams = (data) => {
+      const params = new URLSearchParams();
+      Object.entries(data).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && String(value).trim() !== "") params.append(key, String(value));
+      });
+      return params;
+    };
+
+    const attempts = [payload];
+    if (payload.additional_image_urls) {
+      const fallback = { ...payload };
+      delete fallback.additional_image_urls;
+      attempts.push(fallback);
+    }
+
+    let lastError = null;
+    for (const attempt of attempts) {
+      const res = await axios.post(url, makeParams(attempt), {
+        headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 30000,
+        validateStatus: () => true,
+      });
+      if (res.status >= 200 && res.status < 300) return res.data;
+      lastError = new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
+    }
+
+    throw lastError || new Error("No se pudo sincronizar en Meta");
   }
 
   async function syncMetaCatalog(properties) {
@@ -689,21 +932,13 @@ export function createCatalogAdmin(options = {}) {
 
     const results = [];
     for (const property of properties) {
-      const payload = buildMetaPayload(
-        property,
-        {
-          metaUrl: META_DEFAULT_URL,
-          metaImageUrl: META_DEFAULT_IMAGE_URL,
-          metaAvailability: META_DEFAULT_AVAILABILITY,
-        },
-        { extraMetaFields }
-      );
+      const payload = buildMetaPayload(property, { metaUrl: META_DEFAULT_URL, metaImageUrl: META_DEFAULT_IMAGE_URL, metaAvailability: META_DEFAULT_AVAILABILITY }, { extraMetaFields });
       if (!payload.retailer_id || !payload.name || !payload.price || !payload.currency) {
         results.push({ id: property.id, ok: false, message: "Faltan campos mínimos para Meta (retailer_id, name, price, currency)." });
         continue;
       }
       if (!payload.url || !payload.image_url) {
-        results.push({ id: property.id, ok: false, message: "Falta meta_url o meta_image_url para sincronizar con Meta." });
+        results.push({ id: property.id, ok: false, message: "Falta URL principal o imagen principal para Meta." });
         continue;
       }
       try {
@@ -714,14 +949,13 @@ export function createCatalogAdmin(options = {}) {
       }
     }
 
-    const okCount = results.filter((r) => r.ok).length;
+    const okCount = results.filter((item) => item.ok).length;
     const failCount = results.length - okCount;
     syncState.lastMetaSyncAt = new Date().toISOString();
     syncState.lastMetaSyncOk = failCount === 0;
     syncState.lastMetaSyncMessage = `Meta sincronizado: ${okCount} OK, ${failCount} con error.`;
     return { ok: failCount === 0, results, message: syncState.lastMetaSyncMessage };
   }
-
 
   async function fetchMetaCatalogProducts() {
     if (!META_ACCESS_TOKEN) throw new Error("Falta META_ACCESS_TOKEN");
@@ -730,32 +964,21 @@ export function createCatalogAdmin(options = {}) {
     const items = [];
     let after = "";
     let pageCount = 0;
-
     while (pageCount < 25) {
       pageCount += 1;
       const res = await axios.get(`https://graph.facebook.com/${META_GRAPH_VERSION}/${META_CATALOG_ID}/products`, {
         headers: { Authorization: `Bearer ${META_ACCESS_TOKEN}` },
-        params: {
-          fields: "id,retailer_id,name,description,price,currency,url,image_url,availability",
-          limit: 100,
-          ...(after ? { after } : {}),
-        },
+        params: { fields: "id,retailer_id,name,description,price,currency,url,image_url,availability", limit: 100, ...(after ? { after } : {}) },
         timeout: 30000,
         validateStatus: () => true,
       });
-
-      if (res.status < 200 || res.status >= 300) {
-        throw new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
-      }
-
+      if (res.status < 200 || res.status >= 300) throw new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
       const pageItems = Array.isArray(res.data?.data) ? res.data.data : [];
       items.push(...pageItems);
-
       const nextAfter = cleanText(res.data?.paging?.cursors?.after || "");
       if (!nextAfter || !pageItems.length) break;
       after = nextAfter;
     }
-
     return items;
   }
 
@@ -763,55 +986,25 @@ export function createCatalogAdmin(options = {}) {
     const metaItems = await fetchMetaCatalogProducts();
     const current = dedupeProperties(store.properties);
     const currentByKey = new Map(current.map((item) => [getPropertyMergeKey(item), item]));
-
-    const imported = metaItems
-      .map((product) => buildImportedPropertyFromMetaProduct(product, currentByKey.get(getPropertyMergeKey(product)) || null))
-      .filter(Boolean);
-
+    const imported = metaItems.map((product) => buildImportedPropertyFromMetaProduct(product, currentByKey.get(getPropertyMergeKey(product)) || null, current)).filter(Boolean);
     const merged = mergePropertyCollections(current, imported);
     await updateSharedCatalog(merged, true);
 
     const importedCount = imported.length;
     const createdCount = imported.filter((item) => !currentByKey.has(getPropertyMergeKey(item))).length;
     const updatedCount = importedCount - createdCount;
-
     syncState.lastMetaImportAt = new Date().toISOString();
     syncState.lastMetaImportOk = true;
     syncState.lastMetaImportMessage = `Meta importado: ${importedCount} leídas, ${createdCount} nuevas, ${updatedCount} actualizadas.`;
-
-    return {
-      ok: true,
-      items: store.properties,
-      importedCount,
-      createdCount,
-      updatedCount,
-      message: syncState.lastMetaImportMessage,
-    };
+    return { ok: true, items: store.properties, importedCount, createdCount, updatedCount, message: syncState.lastMetaImportMessage };
   }
 
   async function maybeAutoSync() {
     if (!AUTO_SYNC_ON_SAVE) return { ok: true, skipped: true };
     const bot = await syncBotCatalog(store.properties);
     let meta = { ok: false, skipped: true };
-    if (META_ACCESS_TOKEN && META_CATALOG_ID) {
-      meta = await syncMetaCatalog(store.properties);
-    }
+    if (META_ACCESS_TOKEN && META_CATALOG_ID) meta = await syncMetaCatalog(store.properties);
     return { ok: true, bot, meta };
-  }
-
-  function pickEditablePropertyPayload(body = {}) {
-    const raw = { ...body };
-    delete raw.created_at;
-    delete raw.updated_at;
-    return normalizeProperty({
-      ...raw,
-      features: parseList(raw.features),
-      nearby_places: parseList(raw.nearby_places),
-      faq: typeof raw.faq === "string" ? safeJson(raw.faq, {}) : raw.faq,
-      active: raw.active === false || raw.active === "false" ? false : true,
-      updated_at: new Date().toISOString(),
-      created_at: raw.created_at || new Date().toISOString(),
-    });
   }
 
   function validateProperty(property, currentId = "") {
@@ -824,16 +1017,11 @@ export function createCatalogAdmin(options = {}) {
     if (!cleanText(property.operation)) errors.push("El campo operation es obligatorio.");
     if (!cleanText(property.currency)) errors.push("El campo currency es obligatorio.");
 
-    const duplicated = store.properties.find((item) => {
-      if (currentId && item.id === currentId) return false;
-      return (
-        normalizeText(item.id) === normalizeText(property.id) ||
-        normalizeText(item.retailer_id) === normalizeText(property.retailer_id) ||
-        normalizeText(item.code) === normalizeText(property.code)
-      );
+    const duplicate = store.properties.find((item) => {
+      if (currentId && cleanText(item.id) === cleanText(currentId)) return false;
+      return normalizeText(item.id) === normalizeText(property.id) || normalizeText(item.retailer_id) === normalizeText(property.retailer_id) || normalizeText(item.code) === normalizeText(property.code);
     });
-
-    if (duplicated) errors.push("Ya existe una propiedad con el mismo id, retailer_id o code.");
+    if (duplicate) errors.push("Ya existe una propiedad con el mismo id, retailer_id o code.");
     return errors;
   }
 
@@ -856,8 +1044,10 @@ export function createCatalogAdmin(options = {}) {
         item.title,
         item.location,
         item.short_description,
+        item.raw_post_text,
         item.agent_name,
         item.agent_phone,
+        ...(Array.isArray(item.features) ? item.features : []),
       ].join(" | "));
       return haystack.includes(q);
     });
@@ -877,9 +1067,7 @@ export function createCatalogAdmin(options = {}) {
   router.post("/api/auth/login", (req, res) => {
     const username = cleanText(req.body?.username);
     const password = cleanText(req.body?.password);
-    if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
-    }
+    if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     const token = createSessionToken(username, SESSION_SECRET, SESSION_TTL_MS);
     setSessionCookie(res, token);
     return res.json({ ok: true, username });
@@ -891,11 +1079,10 @@ export function createCatalogAdmin(options = {}) {
   });
 
   router.get("/api/config/status", requireAuth, (_req, res) => {
-    const stats = computeStats(store.properties);
-    return res.json({
+    res.json({
       ok: true,
       businessName: BUSINESS_NAME,
-      stats,
+      stats: computeStats(store.properties),
       integrations: {
         renderReady: !!(RENDER_API_KEY && RENDER_BOT_SERVICE_ID),
         renderBotEnvKey: RENDER_BOT_ENV_KEY,
@@ -912,7 +1099,7 @@ export function createCatalogAdmin(options = {}) {
 
   router.get("/api/properties", requireAuth, (req, res) => {
     const items = getFilteredProperties(req.query);
-    return res.json({ ok: true, items: sortProperties(items), stats: computeStats(store.properties) });
+    res.json({ ok: true, items: sortProperties(items), stats: computeStats(store.properties) });
   });
 
   router.get("/api/properties/export", requireAuth, (_req, res) => {
@@ -921,81 +1108,87 @@ export function createCatalogAdmin(options = {}) {
     res.send(serializeCatalogJson(store.properties));
   });
 
+  router.post("/api/properties/parse-text", requireAuth, (req, res) => {
+    const text = cleanText(req.body?.text || req.body?.raw_post_text || "");
+    const current = req.body?.current && typeof req.body.current === "object" ? req.body.current : {};
+    const parsed = parseListingTextToProperty(text, current, store.properties);
+    res.json({ ok: true, item: parsed, metaPreview: buildMetaPayload(parsed, { metaUrl: META_DEFAULT_URL, metaImageUrl: META_DEFAULT_IMAGE_URL, metaAvailability: META_DEFAULT_AVAILABILITY }, { extraMetaFields }) });
+  });
+
   router.post("/api/properties/import", requireAuth, async (req, res) => {
     const jsonText = cleanText(req.body?.jsonText || "");
     const parsed = safeJson(jsonText, null);
     if (!Array.isArray(parsed)) return res.status(400).json({ ok: false, error: "Debes pegar un JSON array válido." });
     await updateSharedCatalog(parsed, true);
     const auto = await maybeAutoSync().catch((error) => ({ ok: false, error: error.message }));
-    return res.json({ ok: true, items: store.properties, stats: computeStats(store.properties), auto });
+    res.json({ ok: true, items: store.properties, stats: computeStats(store.properties), auto });
   });
 
   router.post("/api/properties", requireAuth, async (req, res) => {
-    const property = pickEditablePropertyPayload(req.body || {});
+    const property = normalizeProperty(req.body || {}, store.properties.length, store.properties);
     const errors = validateProperty(property);
     if (errors.length) return res.status(400).json({ ok: false, errors });
     store.properties.unshift(property);
     await updateSharedCatalog(store.properties, true);
     const auto = await maybeAutoSync().catch((error) => ({ ok: false, error: error.message }));
-    return res.json({ ok: true, item: property, stats: computeStats(store.properties), auto });
+    res.json({ ok: true, item: property, stats: computeStats(store.properties), auto });
   });
 
   router.put("/api/properties/:id", requireAuth, async (req, res) => {
     const id = cleanText(req.params.id);
-    const current = store.properties.find((item) => item.id === id);
+    const current = store.properties.find((item) => cleanText(item.id) === id);
     if (!current) return res.status(404).json({ ok: false, error: "Propiedad no encontrada." });
-    const property = pickEditablePropertyPayload({ ...current, ...req.body, created_at: current.created_at, updated_at: new Date().toISOString() });
+    const property = normalizeProperty({ ...current, ...req.body, created_at: current.created_at, updated_at: new Date().toISOString() }, 0, store.properties, id);
     const errors = validateProperty(property, id);
     if (errors.length) return res.status(400).json({ ok: false, errors });
-    store.properties = store.properties.map((item) => (item.id === id ? property : item));
+    store.properties = store.properties.map((item) => (cleanText(item.id) === id ? property : item));
     await updateSharedCatalog(store.properties, true);
     const auto = await maybeAutoSync().catch((error) => ({ ok: false, error: error.message }));
-    return res.json({ ok: true, item: property, stats: computeStats(store.properties), auto });
+    res.json({ ok: true, item: property, stats: computeStats(store.properties), auto });
   });
 
   router.delete("/api/properties/:id", requireAuth, async (req, res) => {
     const id = cleanText(req.params.id);
-    const exists = store.properties.some((item) => item.id === id);
-    if (!exists) return res.status(404).json({ ok: false, error: "Propiedad no encontrada." });
-    store.properties = store.properties.filter((item) => item.id !== id);
+    if (!store.properties.some((item) => cleanText(item.id) === id)) return res.status(404).json({ ok: false, error: "Propiedad no encontrada." });
+    store.properties = store.properties.filter((item) => cleanText(item.id) !== id);
     await updateSharedCatalog(store.properties, true);
     const auto = await maybeAutoSync().catch((error) => ({ ok: false, error: error.message }));
-    return res.json({ ok: true, stats: computeStats(store.properties), auto });
+    res.json({ ok: true, stats: computeStats(store.properties), auto });
   });
 
   router.post("/api/sync/bot", requireAuth, async (_req, res) => {
     try {
       const result = await syncBotCatalog(store.properties);
-      return res.json({ ok: true, ...result });
+      res.json({ ok: true, ...result });
     } catch (error) {
       syncState.lastBotSyncAt = new Date().toISOString();
       syncState.lastBotSyncOk = false;
       syncState.lastBotSyncMessage = error.message;
-      return res.status(500).json({ ok: false, error: error.message, syncState });
+      res.status(500).json({ ok: false, error: error.message, syncState });
     }
   });
 
   router.post("/api/meta/import", requireAuth, async (_req, res) => {
     try {
       const result = await importMetaCatalogIntoPanel();
-      return res.json({ ok: true, ...result, stats: computeStats(store.properties), syncState });
+      res.json({ ok: true, ...result, stats: computeStats(store.properties), syncState });
     } catch (error) {
       syncState.lastMetaImportAt = new Date().toISOString();
       syncState.lastMetaImportOk = false;
       syncState.lastMetaImportMessage = error.message;
-      return res.status(500).json({ ok: false, error: error.message, syncState });
+      res.status(500).json({ ok: false, error: error.message, syncState });
     }
   });
 
   router.post("/api/sync/meta", requireAuth, async (_req, res) => {
     try {
       const result = await syncMetaCatalog(store.properties);
-      return res.json({ ok: result.ok, ...result });
+      res.json({ ok: result.ok, ...result, syncState });
     } catch (error) {
       syncState.lastMetaSyncAt = new Date().toISOString();
       syncState.lastMetaSyncOk = false;
       syncState.lastMetaSyncMessage = error.message;
-      return res.status(500).json({ ok: false, error: error.message, syncState });
+      res.status(500).json({ ok: false, error: error.message, syncState });
     }
   });
 
@@ -1003,45 +1196,23 @@ export function createCatalogAdmin(options = {}) {
     try {
       const bot = await syncBotCatalog(store.properties);
       const meta = META_ACCESS_TOKEN && META_CATALOG_ID ? await syncMetaCatalog(store.properties) : { ok: false, skipped: true };
-      return res.json({ ok: bot.ok && (meta.ok || meta.skipped), bot, meta, syncState });
+      res.json({ ok: bot.ok && (meta.ok || meta.skipped), bot, meta, syncState });
     } catch (error) {
-      return res.status(500).json({ ok: false, error: error.message, syncState });
+      res.status(500).json({ ok: false, error: error.message, syncState });
     }
   });
 
   router.get("/api/meta-preview/:id", requireAuth, (req, res) => {
-    const property = store.properties.find((item) => item.id === req.params.id);
+    const property = store.properties.find((item) => cleanText(item.id) === cleanText(req.params.id));
     if (!property) return res.status(404).json({ ok: false, error: "Propiedad no encontrada." });
-    return res.json({
-      ok: true,
-      property,
-      metaPayload: buildMetaPayload(
-        property,
-        {
-          metaUrl: META_DEFAULT_URL,
-          metaImageUrl: META_DEFAULT_IMAGE_URL,
-          metaAvailability: META_DEFAULT_AVAILABILITY,
-        },
-        { extraMetaFields }
-      ),
-    });
+    res.json({ ok: true, property, metaPayload: buildMetaPayload(property, { metaUrl: META_DEFAULT_URL, metaImageUrl: META_DEFAULT_IMAGE_URL, metaAvailability: META_DEFAULT_AVAILABILITY }, { extraMetaFields }) });
   });
 
-  router.get("/styles.css", (_req, res) => {
-    res.sendFile(path.join(PUBLIC_DIR, "styles.css"));
-  });
-
-  router.get("/app.js", (_req, res) => {
-    res.sendFile(path.join(PUBLIC_DIR, "app.js"));
-  });
-
+  router.get("/styles.css", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "styles.css")));
+  router.get("/app.js", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "app.js")));
   router.get("/", async (_req, res) => {
     const html = await fs.readFile(path.join(PUBLIC_DIR, "index.html"), "utf8");
-    return res.type("html").send(
-      html
-        .replaceAll("__ADMIN_BASE_PATH__", ADMIN_BASE_PATH)
-        .replaceAll("__BUSINESS_NAME__", BUSINESS_NAME)
-    );
+    res.type("html").send(html.replaceAll("__ADMIN_BASE_PATH__", ADMIN_BASE_PATH).replaceAll("__BUSINESS_NAME__", BUSINESS_NAME));
   });
 
   return { router, init };
