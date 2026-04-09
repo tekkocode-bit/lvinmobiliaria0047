@@ -133,6 +133,81 @@ function parseList(value) {
     .filter(Boolean);
 }
 
+function normalizeNumericChunk(value) {
+  const raw = String(value || "").replace(/\s+/g, "").trim();
+  if (!raw) return "";
+
+  const dotCount = (raw.match(/\./g) || []).length;
+  const commaCount = (raw.match(/,/g) || []).length;
+  const totalSeparators = dotCount + commaCount;
+
+  if (!totalSeparators) return raw;
+
+  if (dotCount && commaCount) {
+    const lastDot = raw.lastIndexOf(".");
+    const lastComma = raw.lastIndexOf(",");
+    const decimalPos = Math.max(lastDot, lastComma);
+    const decimalLen = raw.length - decimalPos - 1;
+
+    if (decimalLen >= 1 && decimalLen <= 2) {
+      const decimalSep = raw[decimalPos];
+      const thousandsRx = decimalSep === "." ? /,/g : /\./g;
+      return raw.replace(thousandsRx, "").replace(decimalSep, ".");
+    }
+
+    return raw.replace(/[.,]/g, "");
+  }
+
+  if (totalSeparators > 1) return raw.replace(/[.,]/g, "");
+
+  const sep = dotCount ? "." : ",";
+  const pos = raw.lastIndexOf(sep);
+  const decimalLen = raw.length - pos - 1;
+
+  if (decimalLen === 3 || decimalLen > 3) return raw.replace(/[.,]/g, "");
+  if (decimalLen >= 1 && decimalLen <= 2) return raw.replace(sep, ".");
+  return raw.replace(/[.,]/g, "");
+}
+
+function parsePriceNumber(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  let text = raw
+    .toLowerCase()
+    .replace(/rd\$/g, "")
+    .replace(/us\$/g, "")
+    .replace(/usd/g, "")
+    .replace(/dop\$/g, "")
+    .replace(/dop/g, "")
+    .replace(/pesos?/g, "")
+    .replace(/mensual(?:es)?/g, "")
+    .replace(/precio\s*/g, "")
+    .replace(/pagar\s*/g, "")
+    .trim();
+
+  const hasMillion = text.includes("millon") || text.includes("millones") || /\bmm\b/.test(text);
+  const hasThousand = /\bk\b/.test(text) || text.includes(" mil") || /^mil\b/.test(text);
+  const match = text.match(/\d[\d.,]*/);
+  if (!match) return "";
+
+  const normalized = normalizeNumericChunk(match[0]);
+  let n = Number(normalized);
+  if (!Number.isFinite(n)) return "";
+
+  if (hasMillion) n *= 1000000;
+  else if (hasThousand && n < 100000) n *= 1000;
+
+  return String(Math.round(n));
+}
+
+function formatMoneyDisplay(value, currency = "DOP") {
+  const digits = parsePriceNumber(value);
+  if (!digits) return String(value || "-").trim() || "-";
+  const prefix = String(currency || "DOP").toUpperCase() === "USD" ? "US$" : "RD$";
+  return `${prefix}${Number(digits).toLocaleString("es-DO")}`;
+}
+
 function propertyToForm(property) {
   if (!property) return { ...defaultForm };
   return {
@@ -170,7 +245,7 @@ function buildMetaPreview(property) {
   return {
     retailer_id: property?.retailer_id || property?.code || property?.id || "",
     name: `${String(property?.operation || "venta").toLowerCase() === "alquiler" ? "ALQUILER" : "VENTA"} | ${property?.title || property?.code || property?.id || ""}`,
-    price: String(property?.price || "").replace(/[^\d]/g, ""),
+    price: parsePriceNumber(property?.price || ""),
     currency: property?.currency || "DOP",
     url: property?.meta_url || "",
     image_url: primary,
@@ -230,7 +305,7 @@ function renderRows() {
         <td><span class="badge ${badgeClass(item.operation)}">${escapeHtml(item.operation || "-")}</span></td>
         <td>${escapeHtml(item.category || "-")}</td>
         <td>${escapeHtml(item.location || "-")}</td>
-        <td>${escapeHtml(item.price || "-")} ${escapeHtml(item.currency || "")}</td>
+        <td>${escapeHtml(formatMoneyDisplay(item.price, item.currency))}</td>
         <td>${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</td>
         <td><span class="badge ${item.active ? "active" : "inactive"}">${item.active ? "Activa" : "Inactiva"}</span></td>
         <td>
@@ -240,6 +315,44 @@ function renderRows() {
           </div>
         </td>
       </tr>
+    `;
+  }).join("");
+}
+
+function renderPropertyCards() {
+  if (!state.properties.length) {
+    return `<div class="empty-state">No hay propiedades cargadas todavía.</div>`;
+  }
+
+  return state.properties.map((item) => {
+    const image = item.primary_image_url || item.meta_image_url || parseList(item.image_urls || [])[0] || "";
+    const selected = item.id === state.selectedId ? " is-selected" : "";
+    return `
+      <article class="property-card-mobile${selected}" data-select-id="${escapeHtml(item.id)}">
+        <div class="property-card-mobile__media">
+          ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(item.title || item.code)}" />` : `<div class="property-card-mobile__placeholder">Sin portada</div>`}
+        </div>
+        <div class="property-card-mobile__body">
+          <div class="property-card-mobile__head">
+            <div>
+              <strong>${escapeHtml(item.title || item.code)}</strong>
+              <small>${escapeHtml(item.id)}</small>
+            </div>
+            <span class="badge ${item.active ? "active" : "inactive"}">${item.active ? "Activa" : "Inactiva"}</span>
+          </div>
+          <div class="property-card-mobile__meta">
+            <span class="badge ${badgeClass(item.operation)}">${escapeHtml(item.operation || "-")}</span>
+            <span>${escapeHtml(item.category || "-")}</span>
+            <span>${escapeHtml(item.location || "-")}</span>
+            <span class="property-card-mobile__price">${escapeHtml(formatMoneyDisplay(item.price, item.currency))}</span>
+            <span>${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</span>
+          </div>
+          <div class="button-row property-card-mobile__actions">
+            <button class="btn btn-secondary btn-small" data-edit-id="${escapeHtml(item.id)}">Editar</button>
+            <button class="btn btn-danger btn-small" data-delete-id="${escapeHtml(item.id)}">Eliminar</button>
+          </div>
+        </div>
+      </article>
     `;
   }).join("");
 }
@@ -267,7 +380,7 @@ function renderSelectedDetail() {
         </div>
         <div class="media-summary-grid">
           <div class="card-panel"><small class="muted">Código</small><strong>${escapeHtml(selected.code || "-")}</strong></div>
-          <div class="card-panel"><small class="muted">Precio</small><strong>${escapeHtml(selected.price || "-")} ${escapeHtml(selected.currency || "")}</strong></div>
+          <div class="card-panel"><small class="muted">Precio</small><strong>${escapeHtml(formatMoneyDisplay(selected.price, selected.currency))}</strong></div>
           <div class="card-panel"><small class="muted">Habitaciones / baños</small><strong>${escapeHtml(selected.bedrooms || "-")} / ${escapeHtml(selected.bathrooms || "-")}</strong></div>
         </div>
         <div class="meta-list" style="margin-top:14px">
@@ -430,7 +543,7 @@ function renderDashboard() {
               </select>
             </label>
           </div>
-          <div class="table-wrap">
+          <div class="table-wrap table-wrap-desktop">
             <table class="table">
               <thead>
                 <tr>
@@ -447,6 +560,7 @@ function renderDashboard() {
               <tbody>${renderRows()}</tbody>
             </table>
           </div>
+          <div class="mobile-cards">${renderPropertyCards()}</div>
         </section>
 
         <section class="section-card">

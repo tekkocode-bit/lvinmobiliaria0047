@@ -136,6 +136,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .main {
   display: grid;
   gap: 18px;
+  min-width: 0;
 }
 .topbar,
 .section-card {
@@ -268,6 +269,80 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .table tbody tr.is-selected { background: rgba(255,149,0,0.08); }
 .table td strong { display: block; }
 .table td small { color: var(--muted); display: block; margin-top: 4px; }
+
+.mobile-cards {
+  display: none;
+  gap: 12px;
+}
+.property-card-mobile {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 12px;
+  background: var(--panel-2);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 18px;
+  padding: 12px;
+}
+.property-card-mobile.is-selected {
+  border-color: var(--line-orange);
+  background: rgba(255,149,0,0.08);
+}
+.property-card-mobile__media {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0d1116;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.property-card-mobile__media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.property-card-mobile__placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 10px;
+}
+.property-card-mobile__body {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.property-card-mobile__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.property-card-mobile__head strong,
+.property-card-mobile__head small {
+  display: block;
+}
+.property-card-mobile__head small {
+  color: var(--muted);
+  margin-top: 4px;
+}
+.property-card-mobile__meta {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-2);
+  font-size: 13px;
+}
+.property-card-mobile__price {
+  color: var(--text);
+  font-weight: 700;
+}
+.property-card-mobile__actions .btn {
+  flex: 1 1 0;
+}
 
 .badge {
   display: inline-flex;
@@ -407,12 +482,36 @@ pre.json-preview {
 @media (max-width: 1200px) {
   .dashboard-shell { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; }
-  .detail-grid, .editor-grid, .sync-grid, .stats-grid, .form-grid-3, .gallery-grid { grid-template-columns: 1fr 1fr; }
+  .detail-grid, .editor-grid, .sync-grid, .stats-grid, .form-grid-3 { grid-template-columns: 1fr 1fr; }
+  .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 860px) {
-  .login-shell, .dashboard-shell { padding: 14px; }
-  .toolbar, .detail-grid, .editor-grid, .sync-grid, .stats-grid, .two-col, .form-grid, .form-grid-3, .gallery-grid, .media-summary-grid { grid-template-columns: 1fr; }
-  .modal-backdrop { padding: 10px; }
+  html, body { overflow-x: hidden; }
+  .login-shell, .dashboard-shell { padding: 12px; }
+  .sidebar, .topbar, .section-card, .login-card { border-radius: 20px; }
+  .toolbar, .detail-grid, .editor-grid, .sync-grid, .stats-grid, .two-col, .form-grid, .form-grid-3, .media-summary-grid { grid-template-columns: 1fr; }
+  .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sidebar-nav { grid-template-columns: 1fr; }
+  .topbar-row, .section-head, .button-row, .property-card-mobile__head { align-items: stretch; }
+  .topbar-row .button-row, .modal-foot .button-row, .property-card-mobile__actions { width: 100%; }
+  .topbar-row .button-row .btn, .modal-foot .button-row .btn, .property-card-mobile__actions .btn { flex: 1 1 0; }
+  .table-wrap-desktop { display: none; }
+  .mobile-cards { display: grid; }
+  .modal-backdrop { padding: 8px; }
+  .modal { width: 100%; max-height: calc(100vh - 16px); border-radius: 20px; }
   .modal-body, .modal-head, .modal-foot { padding-left: 14px; padding-right: 14px; }
+  .input, .select, .textarea, .btn { font-size: 16px; }
+  .toast-layer { left: 12px; right: 12px; top: 12px; }
+  .toast { max-width: none; }
+}
+
+@media (max-width: 560px) {
+  .brand-row { align-items: flex-start; }
+  .brand-badge { width: 48px; height: 48px; border-radius: 16px; }
+  .property-card-mobile { grid-template-columns: 88px minmax(0, 1fr); padding: 10px; }
+  .property-card-mobile__media { border-radius: 12px; }
+  .gallery-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .preview-photo { aspect-ratio: 4 / 3; }
+  .stat-card strong { font-size: 24px; }
 }
