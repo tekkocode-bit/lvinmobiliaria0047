@@ -426,18 +426,22 @@ pre.json-preview {
   background: rgba(5, 8, 12, 0.76);
   padding: 26px;
   display: none;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   z-index: 50;
 }
 .modal-backdrop.open { display: flex; }
 .modal {
   width: min(1300px, 100%);
   max-height: calc(100vh - 50px);
+  min-height: 0;
+  margin: auto;
   overflow: hidden;
   border-radius: 26px;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 .modal-head,
 .modal-foot {
@@ -447,7 +451,10 @@ pre.json-preview {
 .modal-foot { border-bottom: 0; border-top: 1px solid rgba(255,255,255,0.06); }
 .modal-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .modal-body {
-  overflow: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  min-height: 0;
   padding: 18px 20px 20px;
   display: grid;
   gap: 18px;
@@ -499,7 +506,7 @@ pre.json-preview {
   .table-wrap-desktop { display: none; }
   .mobile-cards { display: grid; }
   .modal-backdrop { padding: 8px; }
-  .modal { width: 100%; max-height: calc(100vh - 16px); border-radius: 20px; }
+  .modal { width: 100%; max-height: calc(100vh - 16px); min-height: calc(100vh - 16px); border-radius: 20px; }
   .modal-body, .modal-head, .modal-foot { padding-left: 14px; padding-right: 14px; }
   .input, .select, .textarea, .btn { font-size: 16px; }
   .toast-layer { left: 12px; right: 12px; top: 12px; }
