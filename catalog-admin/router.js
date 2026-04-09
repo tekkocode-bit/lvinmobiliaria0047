@@ -1184,14 +1184,33 @@ export function createCatalogAdmin(options = {}) {
 
     const baseUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
     const headers = { Authorization: `Bearer ${META_ACCESS_TOKEN}` };
-    const fieldAttempts = [
-      "id,retailer_id,name,description,price,currency,url,image_url,availability,additional_image_urls",
-      "id,retailer_id,name,description,price,currency,url,image_url,availability",
+    const pageFieldAttempts = [
+      "id,retailer_id,name,price,currency,url,image_url,availability",
+      "id,retailer_id,name,price,currency,url,image_url",
+      "id,retailer_id,name,price,currency",
     ];
+    const detailFieldAttempts = [
+      "id,retailer_id,name,description,price,currency,url,image_url,availability,additional_image_urls",
+      "id,retailer_id,name,description,price,currency,url,image_url,availability,additional_image_cdn_urls",
+      "id,retailer_id,name,description,price,currency,url,image_url,availability",
+      "id,retailer_id,name,description,price,currency,url,image_url",
+    ];
+    const pageLimitAttempts = [20, 10, 5];
+
+    function makeMetaError(res, fallbackMessage) {
+      const message = cleanText(res?.data?.error?.message || "");
+      const code = cleanText(res?.data?.error?.code || "");
+      if (message) {
+        return new Error(code ? `Meta (${code}): ${message}` : `Meta: ${message}`);
+      }
+      if (res?.status) return new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
+      return new Error(fallbackMessage || "No se pudo leer el catálogo de Meta");
+    }
 
     async function fetchProductDetails(productId) {
       if (!productId) return null;
-      for (const fields of fieldAttempts) {
+      let lastError = null;
+      for (const fields of detailFieldAttempts) {
         const res = await axios.get(`${baseUrl}/${productId}`, {
           headers,
           params: { fields },
@@ -1199,50 +1218,47 @@ export function createCatalogAdmin(options = {}) {
           validateStatus: () => true,
         });
         if (res.status >= 200 && res.status < 300) return res.data || null;
+        lastError = makeMetaError(res, "No se pudo leer el detalle del producto en Meta");
       }
+      if (lastError) console.error("fetchProductDetails meta error:", lastError.message);
       return null;
+    }
+
+    async function fetchProductsPage(after) {
+      let lastError = null;
+      for (const limit of pageLimitAttempts) {
+        for (const fields of pageFieldAttempts) {
+          const res = await axios.get(`${baseUrl}/${META_CATALOG_ID}/products`, {
+            headers,
+            params: { fields, limit, ...(after ? { after } : {}) },
+            timeout: 30000,
+            validateStatus: () => true,
+          });
+          if (res.status >= 200 && res.status < 300) {
+            return { response: res, fields, limit };
+          }
+          lastError = makeMetaError(res, "No se pudo leer el catálogo de Meta");
+          const msg = normalizeText(lastError.message || "");
+          if (!msg.includes("reduce the amount of data") && !msg.includes("reduce the data") && !msg.includes("too much data")) {
+            // sigue probando otras combinaciones, pero si no es un error por tamaño no hace falta insistir con limits más bajos
+          }
+        }
+      }
+      throw lastError || new Error("No se pudo leer el catálogo de Meta");
     }
 
     const items = [];
     let after = "";
     let pageCount = 0;
-    let successfulFields = fieldAttempts[0];
 
-    while (pageCount < 25) {
+    while (pageCount < 50) {
       pageCount += 1;
-      let response = null;
-      let lastError = null;
-
-      for (const fields of fieldAttempts) {
-        const res = await axios.get(`${baseUrl}/${META_CATALOG_ID}/products`, {
-          headers,
-          params: { fields, limit: 100, ...(after ? { after } : {}) },
-          timeout: 30000,
-          validateStatus: () => true,
-        });
-        if (res.status >= 200 && res.status < 300) {
-          response = res;
-          successfulFields = fields;
-          break;
-        }
-        lastError = new Error(`Meta respondió ${res.status}: ${JSON.stringify(res.data)}`);
-      }
-
-      if (!response) throw lastError || new Error("No se pudo leer el catálogo de Meta");
-
+      const { response } = await fetchProductsPage(after);
       const pageItems = Array.isArray(response.data?.data) ? response.data.data : [];
       items.push(...pageItems);
       const nextAfter = cleanText(response.data?.paging?.cursors?.after || "");
       if (!nextAfter || !pageItems.length) break;
       after = nextAfter;
-    }
-
-    const shouldEnrich = !successfulFields.includes("additional_image_urls") || items.some((item) => !normalizeMetaUrlArray(item?.additional_image_urls).length);
-    if (!shouldEnrich) {
-      return items.map((item) => ({
-        ...item,
-        additional_image_urls: uniqueUrlList(item?.additional_image_urls).filter((url) => cleanText(url) !== cleanText(item?.image_url || "")),
-      }));
     }
 
     const enriched = [];
@@ -1254,6 +1270,7 @@ export function createCatalogAdmin(options = {}) {
       };
       merged.additional_image_urls = uniqueUrlList(
         merged?.additional_image_urls,
+        merged?.additional_image_cdn_urls,
         item?.additional_image_urls,
         details?.additional_image_urls,
         details?.additional_image_cdn_urls,
