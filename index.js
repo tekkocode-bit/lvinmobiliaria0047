@@ -2763,42 +2763,73 @@ async function sendCatalogForCategory(to, categoryKey, session = null) {
   }
 
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
-  await axios.post(
-    url,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "product_list",
-        header: { type: "text", text: categoryTitle(categoryKey) },
-        body: { text: "Aquí tienes las propiedades disponibles. Elige una y te ayudo con la visita 👇" },
-        footer: { text: BUSINESS_NAME },
-        action: {
-          catalog_id: WA_CATALOG_ID,
-          sections: [
-            {
-              title: categoryTitle(categoryKey),
-              product_items: properties.map((p) => ({ product_retailer_id: p.retailer_id })),
-            },
-          ],
+  try {
+    await axios.post(
+      url,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "product_list",
+          header: { type: "text", text: categoryTitle(categoryKey) },
+          body: { text: "Aquí tienes las propiedades disponibles. Elige una y te ayudo con la visita 👇" },
+          footer: { text: BUSINESS_NAME },
+          action: {
+            catalog_id: WA_CATALOG_ID,
+            sections: [
+              {
+                title: categoryTitle(categoryKey),
+                product_items: properties.map((p) => ({ product_retailer_id: p.retailer_id })),
+              },
+            ],
+          },
         },
       },
-    },
-    { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
-  );
+      { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
+    );
 
-  await bothubReportMessage({
-    direction: "OUTBOUND",
-    to: String(to),
-    body: `Catálogo enviado: ${categoryTitle(categoryKey)}`,
-    source: "BOT",
-    kind: "PRODUCT_LIST",
-    meta: {
-      category: categoryKey,
-      productRetailerIds: properties.map((p) => p.retailer_id),
-    },
-  });
+    await bothubReportMessage({
+      direction: "OUTBOUND",
+      to: String(to),
+      body: `Catálogo enviado: ${categoryTitle(categoryKey)}`,
+      source: "BOT",
+      kind: "PRODUCT_LIST",
+      meta: {
+        category: categoryKey,
+        productRetailerIds: properties.map((p) => p.retailer_id),
+      },
+    });
+    return;
+  } catch (error) {
+    console.error("sendCatalogForCategory product_list fallback:", error?.response?.data || error?.message || error);
+
+    const preview = properties.slice(0, 12);
+    if (session) {
+      session.lastRecommendations = preview;
+      session.state = "await_property_choice";
+    }
+
+    const lines = preview.map((p, i) => formatPropertyShortLine(p, i));
+    await sendWhatsAppText(
+      to,
+      `Te encontré opciones en *${categoryTitle(categoryKey)}* ✅\n\n${lines.join("\n")}\n\nRespóndeme con el *número* o con el *nombre* de la propiedad que te interese y te ayudo a agendar la visita.`
+    );
+
+
+    await bothubReportMessage({
+      direction: "OUTBOUND",
+      to: String(to),
+      body: `Catálogo fallback texto: ${categoryTitle(categoryKey)}`,
+      source: "BOT",
+      kind: "TEXT",
+      meta: {
+        category: categoryKey,
+        fallback: true,
+        productRetailerIds: preview.map((p) => p.retailer_id),
+      },
+    });
+  }
 }
 
 async function reportLeadEventToCrm({
