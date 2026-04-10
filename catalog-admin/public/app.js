@@ -309,6 +309,83 @@ function buildMetaPreview(property) {
   };
 }
 
+function truncateText(value, max = 120) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…` : text;
+}
+
+function summarizeRepeatingText(value, maxSegments = 3) {
+  const raw = String(value || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  const normalized = raw
+    .replace(/\bubicaci[oó]n\s*:/gi, " | Ubicación: ")
+    .replace(/\bhabitaciones?\s*:/gi, " | Habitaciones: ")
+    .replace(/\bba[nñ]os?\s*:/gi, " | Baños: ");
+
+  const parts = normalized
+    .split(/\s*\|\s*|\s*[•·]\s*|\s{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (!parts.length) return raw;
+
+  const seen = new Set();
+  const compact = [];
+  for (const part of parts) {
+    const key = part.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    compact.push(part);
+    if (compact.length >= maxSegments) break;
+  }
+
+  return compact.join(' • ');
+}
+
+function getDisplayTitle(property) {
+  const raw = String(property?.title || property?.code || property?.id || "");
+  let clean = raw
+    .replace(/\s*\|\s*ubicaci[oó]n\s*:.*$/i, "")
+    .replace(/\s*\|\s*habitaciones?\s*:.*$/i, "")
+    .replace(/\s*\|\s*ba[nñ]os?\s*:.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  clean = summarizeRepeatingText(clean, 2) || clean;
+  return truncateText(clean, 88);
+}
+
+function getDisplayLocation(property) {
+  const raw = String(property?.location || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "Sin ubicación";
+  return truncateText(summarizeRepeatingText(raw, 2) || raw, 58);
+}
+
+function getDisplaySummary(property) {
+  const bits = [];
+  if (property?.bedrooms) bits.push(`${property.bedrooms} hab.`);
+  if (property?.bathrooms) bits.push(`${property.bathrooms} baños`);
+  if (property?.parking) bits.push(`${property.parking} parqueos`);
+  if (property?.area_m2) bits.push(`${property.area_m2} m²`);
+  if (!bits.length && property?.short_description) {
+    return truncateText(summarizeRepeatingText(property.short_description, 2), 78);
+  }
+  return bits.join(' • ');
+}
+
+function getDisplayCategory(category) {
+  const map = {
+    apartamentos: 'Apartamentos',
+    casas: 'Casas',
+    solares: 'Solares',
+    locales_comerciales: 'Locales',
+    proyectos: 'Proyectos',
+  };
+  return map[String(category || '').toLowerCase()] || String(category || '-');
+}
+
 function badgeClass(operation) {
   return operation === "alquiler" ? "alquiler" : operation === "venta" ? "venta" : "neutral";
 }
@@ -353,15 +430,25 @@ function renderRows() {
   return state.properties.map((item) => {
     const selected = item.id === state.selectedId ? "is-selected" : "";
     const image = item.primary_image_url || item.meta_image_url || parseList(item.image_urls || [])[0] || "";
+    const title = getDisplayTitle(item);
+    const location = getDisplayLocation(item);
+    const summary = getDisplaySummary(item);
     return `
       <tr class="${selected}" data-select-id="${escapeHtml(item.id)}">
         <td>
-          ${image ? `<div style="display:flex;gap:12px;align-items:center"><img src="${escapeHtml(image)}" alt="" style="width:64px;height:50px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,0.08)" /><div><strong>${escapeHtml(item.title || item.code)}</strong><small>${escapeHtml(item.id)}</small></div></div>` : `<strong>${escapeHtml(item.title || item.code)}</strong><small>${escapeHtml(item.id)}</small>`}
+          <div class="property-row-card">
+            ${image ? `<img class="property-row-card__image" src="${escapeHtml(image)}" alt="" />` : `<div class="property-row-card__image property-row-card__image--empty">Sin portada</div>`}
+            <div class="property-row-card__copy">
+              <strong class="property-row-card__title" title="${escapeHtml(item.title || item.code || item.id)}">${escapeHtml(title)}</strong>
+              <small class="property-row-card__code">${escapeHtml(item.id)}</small>
+              <small class="property-row-card__meta">${escapeHtml(location)}${summary ? ` • ${escapeHtml(summary)}` : ""}</small>
+            </div>
+          </div>
         </td>
         <td><span class="badge ${badgeClass(item.operation)}">${escapeHtml(item.operation || "-")}</span></td>
-        <td>${escapeHtml(item.category || "-")}</td>
-        <td>${escapeHtml(item.location || "-")}</td>
-        <td>${escapeHtml(formatMoneyDisplay(item.price, item.currency))}</td>
+        <td>${escapeHtml(getDisplayCategory(item.category || "-"))}</td>
+        <td><span class="property-table-location" title="${escapeHtml(item.location || "-")}">${escapeHtml(location)}</span></td>
+        <td><span class="property-table-price">${escapeHtml(formatMoneyDisplay(item.price, item.currency))}</span></td>
         <td>${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</td>
         <td><span class="badge ${item.active ? "active" : "inactive"}">${item.active ? "Activa" : "Inactiva"}</span></td>
         <td>
@@ -383,6 +470,9 @@ function renderPropertyCards() {
   return state.properties.map((item) => {
     const image = item.primary_image_url || item.meta_image_url || parseList(item.image_urls || [])[0] || "";
     const selected = item.id === state.selectedId ? " is-selected" : "";
+    const title = getDisplayTitle(item);
+    const location = getDisplayLocation(item);
+    const summary = getDisplaySummary(item);
     return `
       <article class="property-card-mobile${selected}" data-select-id="${escapeHtml(item.id)}">
         <div class="property-card-mobile__media">
@@ -390,18 +480,21 @@ function renderPropertyCards() {
         </div>
         <div class="property-card-mobile__body">
           <div class="property-card-mobile__head">
-            <div>
-              <strong>${escapeHtml(item.title || item.code)}</strong>
-              <small>${escapeHtml(item.id)}</small>
+            <div class="property-card-mobile__head-copy">
+              <strong class="property-card-mobile__title" title="${escapeHtml(item.title || item.code || item.id)}">${escapeHtml(title)}</strong>
+              <small class="property-card-mobile__code">${escapeHtml(item.id)}</small>
             </div>
-            <span class="badge ${item.active ? "active" : "inactive"}">${item.active ? "Activa" : "Inactiva"}</span>
+            <span class="badge ${item.active ? "active" : "inactive"} property-card-mobile__status">${item.active ? "Activa" : "Inactiva"}</span>
           </div>
-          <div class="property-card-mobile__meta">
+          <div class="property-card-mobile__chips">
             <span class="badge ${badgeClass(item.operation)}">${escapeHtml(item.operation || "-")}</span>
-            <span>${escapeHtml(item.category || "-")}</span>
-            <span>${escapeHtml(item.location || "-")}</span>
+            <span class="meta-chip">${escapeHtml(getDisplayCategory(item.category || "-"))}</span>
+          </div>
+          <div class="property-card-mobile__location" title="${escapeHtml(item.location || "")}">${escapeHtml(location)}</div>
+          ${summary ? `<div class="property-card-mobile__summary">${escapeHtml(summary)}</div>` : ""}
+          <div class="property-card-mobile__footer">
             <span class="property-card-mobile__price">${escapeHtml(formatMoneyDisplay(item.price, item.currency))}</span>
-            <span>${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</span>
+            <span class="property-card-mobile__media-count">${parseList(item.image_urls || []).length} fotos / ${parseList(item.video_urls || []).length} videos</span>
           </div>
           <div class="button-row property-card-mobile__actions">
             <button class="btn btn-secondary btn-small" data-edit-id="${escapeHtml(item.id)}">Editar</button>
@@ -429,8 +522,8 @@ function renderSelectedDetail() {
         ${image ? `<div class="preview-photo"><img src="${escapeHtml(image)}" alt="${escapeHtml(selected.title || "")}" /></div>` : `<div class="preview-photo" style="display:grid;place-items:center;color:var(--muted)">Sin portada</div>`}
         <div class="section-head">
           <div>
-            <h3>${escapeHtml(selected.title || selected.code)}</h3>
-            <p>${escapeHtml(selected.location || "Sin ubicación")}</p>
+            <h3>${escapeHtml(getDisplayTitle(selected) || selected.title || selected.code)}</h3>
+            <p>${escapeHtml(getDisplayLocation(selected))}</p>
           </div>
           <span class="badge ${selected.active ? "active" : "inactive"}">${selected.active ? "Activa" : "Inactiva"}</span>
         </div>
