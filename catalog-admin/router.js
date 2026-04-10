@@ -183,9 +183,7 @@ function parsePriceNumber(value) {
 function buildMetaMinorUnitsPrice(value, currency = "DOP") {
   const digits = parsePriceNumber(value);
   if (!digits) return "";
-  const majorUnits = Number(digits);
-  if (!Number.isFinite(majorUnits)) return "";
-  return String(Math.round(majorUnits * 100));
+  return String(Number(digits));
 }
 
 function formatCatalogPrice(value, currency = "DOP") {
@@ -198,11 +196,27 @@ function formatCatalogPrice(value, currency = "DOP") {
 function formatMetaCatalogPrice(value, currency = "DOP") {
   const raw = cleanText(value);
   if (!raw) return "";
-  const numeric = Number(String(raw).replace(/[^\d.-]/g, ""));
-  if (!Number.isFinite(numeric)) return cleanText(value);
-  const majorUnits = numeric / 100;
-  const prefix = String(currency || "DOP").toUpperCase() === "USD" ? "US$" : "RD$";
-  return `${prefix}${majorUnits.toLocaleString("es-DO")}`;
+  return formatCatalogPrice(raw, currency);
+}
+
+function chooseImportedPrice(metaValue, existingValue, currency = "DOP") {
+  const metaDigits = parsePriceNumber(metaValue);
+  const existingDigits = parsePriceNumber(existingValue);
+
+  if (metaDigits && existingDigits) {
+    const metaNum = Number(metaDigits);
+    const existingNum = Number(existingDigits);
+    if (Number.isFinite(metaNum) && Number.isFinite(existingNum)) {
+      const ratio = existingNum > metaNum ? existingNum / Math.max(metaNum, 1) : metaNum / Math.max(existingNum, 1);
+      if (ratio >= 20) {
+        return formatCatalogPrice(existingDigits, currency);
+      }
+    }
+  }
+
+  if (metaDigits) return formatCatalogPrice(metaDigits, currency);
+  if (existingDigits) return formatCatalogPrice(existingDigits, currency);
+  return cleanText(existingValue || metaValue || "");
 }
 
 function detectOperationFromText(value, fallback = "venta") {
@@ -320,6 +334,31 @@ function extractPriceFromText(raw, currency = "DOP", fallback = "") {
 
   if (fallback) return cleanText(fallback);
   return "";
+}
+
+
+function resolveNormalizedPrice(raw = {}, currency = "DOP") {
+  const explicit = cleanText(raw?.price || "");
+  const explicitDigits = parsePriceNumber(explicit);
+  const textFallback = [raw?.raw_post_text, raw?.source_text, raw?.short_description, raw?.description]
+    .map((value) => cleanText(value))
+    .filter(Boolean)
+    .join("\n");
+  const extracted = textFallback ? extractPriceFromText(textFallback, currency, "") : "";
+  const extractedDigits = parsePriceNumber(extracted);
+
+  if (explicitDigits && extractedDigits) {
+    const explicitNum = Number(explicitDigits);
+    const extractedNum = Number(extractedDigits);
+    if (Number.isFinite(explicitNum) && Number.isFinite(extractedNum)) {
+      const ratio = explicitNum > extractedNum ? explicitNum / Math.max(extractedNum, 1) : extractedNum / Math.max(explicitNum, 1);
+      if (ratio >= 20) return formatCatalogPrice(extractedDigits, currency);
+    }
+  }
+
+  if (explicitDigits) return formatCatalogPrice(explicitDigits, currency);
+  if (extractedDigits) return formatCatalogPrice(extractedDigits, currency);
+  return explicit;
 }
 
 function extractAgentName(raw, fallback = "") {
@@ -588,7 +627,7 @@ function normalizeProperty(raw, index = 0, existingItems = [], currentId = "") {
     title: cleanText(base.title || ids.code || ids.id),
     category: base.category,
     operation: base.operation,
-    price: cleanText(raw?.price || ""),
+    price: resolveNormalizedPrice(raw, cleanText(raw?.currency || "DOP") || "DOP"),
     currency: cleanText(raw?.currency || "DOP") || "DOP",
     location: base.location,
     exact_address: cleanText(raw?.exact_address || raw?.direccion || raw?.direccion_exacta || ""),
@@ -845,10 +884,10 @@ async function uploadBufferToCloudinary({ cloudName, apiKey, apiSecret, buffer, 
 
 function buildImportedPropertyFromMetaProduct(product = {}, existing = null, currentItems = []) {
   const description = cleanText(product?.description || existing?.short_description || "");
-  const operation = detectOperationFromText(`${product?.name || ""} ${description}`, existing?.operation || "venta");
-  const category = detectCategoryFromText(`${product?.name || ""} ${description}`, existing?.category || "apartamentos");
-  const location = extractLocationFromText(description, existing?.location || "");
-  const title = extractTitleFromText(product?.name || existing?.title || "", operation, category, location);
+  const detectedOperation = detectOperationFromText(`${product?.name || ""} ${description}`, existing?.operation || "venta");
+  const detectedCategory = detectCategoryFromText(`${product?.name || ""} ${description}`, existing?.category || "apartamentos");
+  const detectedLocation = extractLocationFromText(description, existing?.location || "");
+  const detectedTitle = extractTitleFromText(product?.name || existing?.title || "", detectedOperation, detectedCategory, detectedLocation);
   const primaryMetaImage = cleanText(product?.image_url || existing?.meta_image_url || existing?.primary_image_url || "");
   const additionalMetaImages = uniqueUrlList(
     product?.additional_image_urls,
@@ -857,19 +896,20 @@ function buildImportedPropertyFromMetaProduct(product = {}, existing = null, cur
     existing?.meta_additional_image_urls
   ).filter((url) => url !== primaryMetaImage);
   const mergedImages = uniqueUrlList(primaryMetaImage ? [primaryMetaImage] : [], additionalMetaImages, existing?.image_urls);
+  const resolvedCurrency = cleanText(product?.currency || existing?.currency || "DOP") || "DOP";
 
   const base = {
     ...(existing || {}),
     id: cleanText(existing?.id || product?.retailer_id || product?.id || ""),
     retailer_id: cleanText(product?.retailer_id || existing?.retailer_id || existing?.code || existing?.id || ""),
     code: cleanText(existing?.code || product?.retailer_id || product?.id || ""),
-    title,
-    operation,
-    category,
-    currency: cleanText(product?.currency || existing?.currency || "DOP") || "DOP",
-    price: formatMetaCatalogPrice(product?.price || existing?.price || "", product?.currency || existing?.currency || "DOP") || formatCatalogPrice(existing?.price || "", existing?.currency || product?.currency || "DOP"),
-    location,
-    short_description: sanitizeMetaImportedDescription(description) || cleanText(existing?.short_description || ""),
+    title: cleanText(existing?.title || detectedTitle),
+    operation: cleanText(existing?.operation || detectedOperation),
+    category: cleanText(existing?.category || detectedCategory),
+    currency: resolvedCurrency,
+    price: chooseImportedPrice(product?.price || "", existing?.price || "", resolvedCurrency),
+    location: cleanText(existing?.location || detectedLocation),
+    short_description: cleanText(existing?.short_description || sanitizeMetaImportedDescription(description) || ""),
     meta_url: cleanText(product?.url || existing?.meta_url || ""),
     meta_image_url: primaryMetaImage,
     meta_additional_image_urls: additionalMetaImages,
